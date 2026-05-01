@@ -10,6 +10,8 @@ from app.services.default_competitors import default_competitor_payloads
 
 router = APIRouter(prefix="/api/competitors", tags=["competitors"])
 
+SHOPIFY_SELECTOR_CONFIG = {"discover_collections": True, "include_all_products": True}
+
 
 @router.get("", response_model=List[CompetitorOut])
 async def list_competitors(db: AsyncSession = Depends(get_db)):
@@ -19,7 +21,7 @@ async def list_competitors(db: AsyncSession = Depends(get_db)):
 
 @router.post("", response_model=CompetitorOut, status_code=201)
 async def create_competitor(data: CompetitorCreate, db: AsyncSession = Depends(get_db)):
-    competitor = Competitor(**data.model_dump())
+    competitor = Competitor(**_normalize_competitor_payload(data.model_dump()))
     db.add(competitor)
     await db.flush()
     await db.refresh(competitor)
@@ -58,7 +60,7 @@ async def update_competitor(competitor_id: int, data: CompetitorUpdate, db: Asyn
     competitor = result.scalar_one_or_none()
     if not competitor:
         raise HTTPException(status_code=404, detail="Competitor not found")
-    for field, value in data.model_dump(exclude_none=True).items():
+    for field, value in _normalize_competitor_payload(data.model_dump(exclude_none=True)).items():
         setattr(competitor, field, value)
     await db.flush()
     await db.refresh(competitor)
@@ -91,3 +93,21 @@ async def scan_now(competitor_id: int, db: AsyncSession = Depends(get_db)):
     from app.workers.tasks import scrape_competitor_task
     task = scrape_competitor_task.delay(competitor_id)
     return {"message": "Scan queued", "task_id": task.id}
+
+
+def _normalize_competitor_payload(payload: dict) -> dict:
+    listing_urls = payload.get("listing_urls") or []
+    scrape_type = payload.get("scrape_type")
+
+    if not scrape_type or (scrape_type in {"generic_selector", "custom"} and not listing_urls):
+        payload["scrape_type"] = "shopify_json"
+        payload["listing_urls"] = []
+        payload["selector_config"] = _shopify_selector_config(payload.get("selector_config"))
+    elif scrape_type == "shopify_json":
+        payload["selector_config"] = _shopify_selector_config(payload.get("selector_config"))
+
+    return payload
+
+
+def _shopify_selector_config(selector_config: dict | None) -> dict:
+    return {**SHOPIFY_SELECTOR_CONFIG, **(selector_config or {})}

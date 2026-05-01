@@ -71,6 +71,10 @@ async def _scrape_competitor_async(competitor_id: int):
                 headless=settings.PLAYWRIGHT_HEADLESS,
                 user_agent=settings.USER_AGENT,
             )
+            if _should_reject_empty_scrape(competitor_dict, products):
+                raise RuntimeError(
+                    "Scrape returned 0 products. Treating this as a failed scan to avoid marking the catalog missing."
+                )
 
             changes = await detect_changes(session, competitor, products)
 
@@ -149,6 +153,11 @@ async def _scrape_competitor_async(competitor_id: int):
                 from app.services.notification import notify_scrape_failure
                 await notify_scrape_failure(failure_webhook_url, competitor.name, str(e))
             return {"status": "failed", "error": str(e)}
+
+
+def _should_reject_empty_scrape(competitor: dict, products: list[dict]) -> bool:
+    selector_config = competitor.get("selector_config") or {}
+    return not products and selector_config.get("allow_empty_catalog") is not True
 
 
 @celery_app.task

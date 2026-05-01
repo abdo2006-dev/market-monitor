@@ -136,6 +136,24 @@ class TestPriceEvents:
         assert _prices_differ(None, 10.0) == True
         assert _prices_differ(None, None) == False
 
+    def test_existing_product_matching_does_not_collapse_same_titles(self):
+        from types import SimpleNamespace
+        from app.services.detection import _index_existing_products, _match_existing_product
+
+        existing = SimpleNamespace(
+            url="https://store.test/products/chill-knife",
+            external_id=None,
+            normalized_title="chill",
+        )
+        by_url, by_external_id = _index_existing_products([existing])
+
+        assert _match_existing_product(
+            "https://store.test/products/chill-gun",
+            None,
+            by_url,
+            by_external_id,
+        ) is None
+
 
 # ── Scraper HTML Parsing Tests ─────────────────────────────────────────────────
 
@@ -200,6 +218,45 @@ class TestShopifyScraper:
         assert product["url"] == "https://example.com/products/rainbow-shiny-pet"
 
 
+class TestCompetitorDefaults:
+    def test_base_url_only_competitor_uses_shopify_catalog(self):
+        from app.api.competitors import _normalize_competitor_payload
+
+        payload = _normalize_competitor_payload({
+            "name": "MM2Cheap",
+            "base_url": "https://mm2.cheap/",
+            "scrape_type": "generic_selector",
+            "listing_urls": [],
+            "selector_config": {},
+        })
+        assert payload["scrape_type"] == "shopify_json"
+        assert payload["selector_config"]["discover_collections"] is True
+        assert payload["selector_config"]["include_all_products"] is True
+
+    def test_shopify_catalog_defaults_include_all_products(self):
+        from app.api.competitors import _normalize_competitor_payload
+
+        payload = _normalize_competitor_payload({
+            "scrape_type": "shopify_json",
+            "selector_config": {"collection_handles": ["mm2"]},
+        })
+        assert payload["selector_config"]["collection_handles"] == ["mm2"]
+        assert payload["selector_config"]["include_all_products"] is True
+
+
+class TestScanSafety:
+    def test_empty_scrape_is_rejected_by_default(self):
+        from app.workers.tasks import _should_reject_empty_scrape
+
+        assert _should_reject_empty_scrape({"selector_config": {}}, []) is True
+
+    def test_empty_scrape_can_be_explicitly_allowed(self):
+        from app.workers.tasks import _should_reject_empty_scrape
+
+        competitor = {"selector_config": {"allow_empty_catalog": True}}
+        assert _should_reject_empty_scrape(competitor, []) is False
+
+
 class TestFuzzySearch:
     def test_match_score_handles_imperfect_spelling(self):
         from app.api.search_dashboard_settings import _match_score
@@ -214,3 +271,15 @@ class TestFuzzySearch:
         assert "chill" in aliases
         assert _comparison_score("chill", "chill") > 0.9
         assert _comparison_score("chill", "chillin chili") < 0.86
+
+    def test_comparison_alias_is_symmetric_for_descriptors(self):
+        from app.api.search_dashboard_settings import _comparison_aliases, _comparison_score
+
+        target_aliases = _comparison_aliases("chill")
+        candidate_aliases = _comparison_aliases("chill knife")
+        score = max(
+            _comparison_score(target, candidate)
+            for target in target_aliases
+            for candidate in candidate_aliases
+        )
+        assert score > 0.9

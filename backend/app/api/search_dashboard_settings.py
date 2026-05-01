@@ -140,7 +140,12 @@ async def compare_product(
 
     best_by_competitor = {}
     for product, competitor_name in rows:
-        score = max(_comparison_score(alias, product.normalized_title) for alias in aliases)
+        candidate_aliases = _comparison_aliases(product.normalized_title)
+        score = max(
+            _comparison_score(target_alias, candidate_alias)
+            for target_alias in aliases
+            for candidate_alias in candidate_aliases
+        )
         if score < 0.86:
             continue
         current = best_by_competitor.get(product.competitor_id)

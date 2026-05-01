@@ -1,7 +1,12 @@
 import React, { useState, useEffect } from 'react'
 import { Modal, Button, Input, Textarea } from './ui'
 
-const DEFAULT_SELECTOR = JSON.stringify({
+const DEFAULT_SHOPIFY_SELECTOR = JSON.stringify({
+  "discover_collections": true,
+  "include_all_products": true
+}, null, 2)
+
+const DEFAULT_GENERIC_SELECTOR = JSON.stringify({
   "product_card": ".product-card",
   "title": ".product-title",
   "price": ".price",
@@ -13,8 +18,8 @@ const DEFAULT_SELECTOR = JSON.stringify({
 
 const DEFAULT_FORM = {
   name: '', base_url: '', category: '', active: true,
-  scan_frequency_minutes: 60, scrape_type: 'generic_selector',
-  listing_urls_text: '', selector_config_text: DEFAULT_SELECTOR,
+  scan_frequency_minutes: 60, scrape_type: 'shopify_json',
+  listing_urls_text: '', selector_config_text: DEFAULT_SHOPIFY_SELECTOR,
   discord_webhook_url: '', notes: '',
 }
 
@@ -50,6 +55,19 @@ export default function CompetitorForm({
 
   const set = (k: string) => (e: React.ChangeEvent<any>) =>
     setForm(f => ({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value }))
+
+  const setScrapeType = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const scrapeType = e.target.value
+    setForm(f => ({
+      ...f,
+      scrape_type: scrapeType,
+      selector_config_text: scrapeType === 'shopify_json'
+        ? DEFAULT_SHOPIFY_SELECTOR
+        : (f.selector_config_text.trim() && f.selector_config_text.trim() !== DEFAULT_SHOPIFY_SELECTOR.trim()
+          ? f.selector_config_text
+          : DEFAULT_GENERIC_SELECTOR),
+    }))
+  }
 
   const submit = () => {
     setError('')
@@ -107,8 +125,9 @@ export default function CompetitorForm({
           </div>
           <div style={fieldStyle}>
             <label style={labelStyle}>Scrape Type</label>
-            <select value={form.scrape_type} onChange={set('scrape_type')}
+            <select value={form.scrape_type} onChange={setScrapeType}
               style={{ background: '#0f1117', border: '1px solid #2d3048', borderRadius: 8, padding: '8px 12px', color: '#e4e4f0', fontSize: 14, outline: 'none' }}>
+              <option value="shopify_json">Auto Catalog</option>
               <option value="generic_selector">Generic Selector</option>
               <option value="custom">Custom</option>
             </select>

@@ -151,12 +151,12 @@ export default function MarketSearchPage() {
                             <div style={{ color: '#6366f1', fontSize: 11 }}>{Math.round(row.match_score * 100)}% match</div>
                           </div>
                         </div>
-                      ) : <span style={{ color: '#6b7280' }}>Not found</span>}
+                      ) : <span style={{ color: '#6b7280' }}>N/A</span>}
                     </Td>
-                    <Td style={{ color: '#8b8fa8', fontSize: 12 }}>{p?.category || '—'}</Td>
-                    <Td style={{ fontWeight: 800, color: p ? '#e4e4f0' : '#6b7280' }}>{p ? formatPrice(p.current_price, p.currency) : '—'}</Td>
-                    <Td>{p ? <StockBadge status={p.stock_status} /> : '—'}</Td>
-                    <Td style={{ color: '#8b8fa8', fontSize: 13 }}>{p ? timeAgo(p.last_checked_at) : '—'}</Td>
+                    <Td style={{ color: '#8b8fa8', fontSize: 12 }}>{p?.category || 'N/A'}</Td>
+                    <Td style={{ fontWeight: 800, color: p ? '#e4e4f0' : '#6b7280' }}>{p ? formatPrice(p.current_price, p.currency) : 'N/A'}</Td>
+                    <Td>{p ? <StockBadge status={p.stock_status} /> : 'N/A'}</Td>
+                    <Td style={{ color: '#8b8fa8', fontSize: 13 }}>{p ? timeAgo(p.last_checked_at) : 'N/A'}</Td>
                     <Td>
                       {p && (
                         <a href={p.url} target="_blank" rel="noopener noreferrer"

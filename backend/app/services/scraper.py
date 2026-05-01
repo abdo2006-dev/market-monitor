@@ -35,7 +35,8 @@ async def scrape_competitor(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
     Returns list of product dicts.
     """
     scrape_type = competitor.get("scrape_type", "generic_selector")
-    if scrape_type == "shopify_json":
+    listing_urls = competitor.get("listing_urls", [])
+    if scrape_type == "shopify_json" or (scrape_type == "generic_selector" and not listing_urls):
         return await scrape_shopify_json(competitor, max_pages=max_pages, user_agent=user_agent)
 
     try:
@@ -46,7 +47,6 @@ async def scrape_competitor(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
 
     selector_config = competitor.get("selector_config", {})
     base_url = competitor.get("base_url", "")
-    listing_urls = competitor.get("listing_urls", [])
     default_currency = "USD"
 
     all_products = []

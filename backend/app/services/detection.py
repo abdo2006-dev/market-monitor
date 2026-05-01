@@ -29,32 +29,19 @@ async def detect_changes(
     result = await session.execute(
         select(Product).where(Product.competitor_id == competitor.id)
     )
-    existing_products = {p.url: p for p in result.scalars().all()}
-    scraped_urls = set()
+    existing_products = result.scalars().all()
+    existing_by_url, existing_by_external_id = _index_existing_products(existing_products)
+    seen_product_ids = set()
 
     for item in scraped_products:
         url = item.get("url", "")
         if not url:
             continue
-        scraped_urls.add(url)
         norm_title = normalize_title(item.get("title", ""))
 
-        # Match by URL first
-        product = existing_products.get(url)
-
-        # Match by external_id / SKU
-        if not product and item.get("external_id"):
-            for p in existing_products.values():
-                if p.external_id == item["external_id"]:
-                    product = p
-                    break
-
-        # Match by normalized title
-        if not product and norm_title:
-            for p in existing_products.values():
-                if p.normalized_title == norm_title:
-                    product = p
-                    break
+        # Match by stable identifiers only. Product names are useful for search,
+        # but are not reliable IDs because stores often reuse short item names.
+        product = _match_existing_product(url, item.get("external_id"), existing_by_url, existing_by_external_id)
 
         if not product:
             # New product
@@ -109,11 +96,15 @@ async def detect_changes(
             )
             session.add(event)
             new_count += 1
-            existing_products[url] = product
+            existing_by_url[url] = product
+            if product.external_id:
+                existing_by_external_id[product.external_id] = product
+            seen_product_ids.add(product.id)
         else:
             # Existing product - check for changes
             changed = False
             snapshot_needed = False
+            seen_product_ids.add(product.id)
 
             old_price = product.current_price
             new_price = item.get("price")
@@ -173,6 +164,13 @@ async def detect_changes(
                 product.normalized_title = normalize_title(product.title)
                 snapshot_needed = True
 
+            if product.url != url:
+                product.url = url
+                snapshot_needed = True
+
+            if product.external_id != item.get("external_id"):
+                product.external_id = item.get("external_id")
+
             if new_category != old_category:
                 product.category = new_category
                 snapshot_needed = True
@@ -196,8 +194,8 @@ async def detect_changes(
                 session.add(snapshot)
 
     # Mark products not seen as missing
-    for url, product in existing_products.items():
-        if url not in scraped_urls and product.active:
+    for product in existing_products:
+        if product.id not in seen_product_ids and product.active:
             product.consecutive_misses = (product.consecutive_misses or 0) + 1
             product.last_checked_at = now
             if product.consecutive_misses >= CONSECUTIVE_MISS_THRESHOLD:
@@ -222,6 +220,30 @@ def _prices_differ(old: Optional[Decimal], new: Optional[float]) -> bool:
     if old is None or new is None:
         return True
     return abs(float(old) - float(new)) > 0.001
+
+
+def _index_existing_products(products: list[Product]) -> tuple[dict[str, Product], dict[str, Product]]:
+    by_url = {p.url: p for p in products}
+    by_external_id = {
+        p.external_id: p
+        for p in products
+        if p.external_id
+    }
+    return by_url, by_external_id
+
+
+def _match_existing_product(
+    url: str,
+    external_id: Optional[str],
+    existing_by_url: dict[str, Product],
+    existing_by_external_id: dict[str, Product],
+) -> Optional[Product]:
+    product = existing_by_url.get(url)
+    if product:
+        return product
+    if external_id:
+        return existing_by_external_id.get(external_id)
+    return None
 
 
 def _get_price_event_type(old: Optional[Decimal], new: Optional[float]) -> str:
