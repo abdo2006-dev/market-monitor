@@ -56,6 +56,7 @@ class ProductOut(BaseModel):
     external_id: Optional[str] = None
     title: str
     normalized_title: str
+    category: Optional[str] = None
     url: str
     image_url: Optional[str] = None
     current_price: Optional[Decimal] = None
@@ -97,6 +98,7 @@ class EventOut(BaseModel):
     competitor_name: Optional[str] = None
     product_id: Optional[int] = None
     product_title: Optional[str] = None
+    product_category: Optional[str] = None
     event_type: str
     old_value: Optional[Any] = None
     new_value: Optional[Any] = None

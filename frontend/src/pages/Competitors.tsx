@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getCompetitors, createCompetitor, updateCompetitor, deleteCompetitor, scanNow } from '../lib/api'
+import { getCompetitors, createCompetitor, updateCompetitor, deleteCompetitor, scanNow, seedDefaultCompetitors } from '../lib/api'
 import { Card, Button, Table, Tr, Td, Loading, EmptyState, ErrorState } from '../components/ui'
 import { PageHeader } from '../components/layout/Sidebar'
 import { timeAgo } from '../lib/utils'
@@ -28,6 +28,10 @@ export default function CompetitorsPage() {
     mutationFn: deleteCompetitor,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['competitors'] }),
   })
+  const seedMut = useMutation({
+    mutationFn: seedDefaultCompetitors,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['competitors'] }),
+  })
 
   const handleScanNow = async (id: number) => {
     setScanningId(id)
@@ -51,8 +55,13 @@ export default function CompetitorsPage() {
 
       <Card>
         {competitors.length === 0 ? (
-          <EmptyState icon="🏢" title="No competitors yet"
-            description="Add your first competitor to start monitoring prices." />
+          <div>
+            <EmptyState icon="🏢" title="No competitors yet"
+              description="Add your first competitor or load the starter Roblox stores." />
+            <div style={{ display: 'flex', justifyContent: 'center', marginTop: -36, paddingBottom: 24 }}>
+              <Button onClick={() => seedMut.mutate()} loading={seedMut.isPending}>Add Starter Stores</Button>
+            </div>
+          </div>
         ) : (
           <Table headers={['Name', 'Category', 'Status', 'Frequency', 'Last Scan', 'Products', 'Actions']}>
             {competitors.map((c: any) => (

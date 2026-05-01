@@ -63,6 +63,7 @@ async def detect_changes(
                 external_id=item.get("external_id"),
                 title=item.get("title", ""),
                 normalized_title=norm_title,
+                category=item.get("category"),
                 url=url,
                 image_url=item.get("image_url"),
                 current_price=item.get("price"),
@@ -81,6 +82,7 @@ async def detect_changes(
             snapshot = ProductSnapshot(
                 product_id=product.id,
                 title=product.title,
+                category=product.category,
                 price=product.current_price,
                 currency=product.currency,
                 stock_status=product.stock_status,
@@ -96,6 +98,7 @@ async def detect_changes(
                 old_value=None,
                 new_value={
                     "title": product.title,
+                    "category": product.category,
                     "price": float(product.current_price) if product.current_price else None,
                     "currency": product.currency,
                     "stock_status": product.stock_status,
@@ -116,6 +119,8 @@ async def detect_changes(
             new_price = item.get("price")
             old_stock = product.stock_status
             new_stock = item.get("stock_status", "unknown")
+            old_category = product.category
+            new_category = item.get("category") or old_category
 
             # Price change
             if _prices_differ(old_price, new_price):
@@ -129,8 +134,9 @@ async def detect_changes(
                     competitor_id=competitor.id,
                     product_id=product.id,
                     event_type=price_event_type,
-                    old_value={"price": old_val, "currency": str(product.currency)},
+                    old_value={"price": old_val, "currency": str(product.currency), "category": product.category},
                     new_value={"price": new_val, "currency": item.get("currency", "USD"),
+                               "category": new_category,
                                "diff_amount": round(diff_amount, 2) if diff_amount else None,
                                "diff_percentage": round(diff_pct, 2) if diff_pct else None},
                     event_message=f"Price changed for {product.title}: {old_val} -> {new_val}",
@@ -150,8 +156,8 @@ async def detect_changes(
                     competitor_id=competitor.id,
                     product_id=product.id,
                     event_type=stock_event,
-                    old_value={"stock_status": old_stock},
-                    new_value={"stock_status": new_stock},
+                    old_value={"stock_status": old_stock, "category": product.category},
+                    new_value={"stock_status": new_stock, "category": new_category},
                     event_message=f"Stock changed for {product.title}: {old_stock} -> {new_stock}",
                     detected_at=now,
                 )
@@ -167,6 +173,10 @@ async def detect_changes(
                 product.normalized_title = normalize_title(product.title)
                 snapshot_needed = True
 
+            if new_category != old_category:
+                product.category = new_category
+                snapshot_needed = True
+
             product.last_seen_at = now
             product.last_checked_at = now
             product.active = True
@@ -176,6 +186,7 @@ async def detect_changes(
                 snapshot = ProductSnapshot(
                     product_id=product.id,
                     title=product.title,
+                    category=product.category,
                     price=product.current_price,
                     currency=product.currency,
                     stock_status=product.stock_status,
@@ -195,7 +206,7 @@ async def detect_changes(
                     competitor_id=competitor.id,
                     product_id=product.id,
                     event_type="product_removed",
-                    old_value={"url": product.url, "title": product.title},
+                    old_value={"url": product.url, "title": product.title, "category": product.category},
                     new_value=None,
                     event_message=f"Product no longer seen: {product.title}",
                     detected_at=now,

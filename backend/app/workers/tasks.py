@@ -25,7 +25,7 @@ def scrape_competitor_task(self, competitor_id: int):
 async def _scrape_competitor_async(competitor_id: int):
     from sqlalchemy.ext.asyncio import AsyncSession
     from app.database import AsyncSessionLocal
-    from app.models import Competitor, ScrapeRun, Event
+    from app.models import Competitor, ScrapeRun, Event, Product
     from app.services.scraper import scrape_competitor
     from app.services.detection import detect_changes
     from app.services.notification import dispatch_event_notifications
@@ -51,6 +51,11 @@ async def _scrape_competitor_async(competitor_id: int):
         await session.commit()
 
         try:
+            existing_count = (await session.execute(
+                select(Product).where(Product.competitor_id == competitor_id).limit(1)
+            )).scalar_one_or_none()
+            is_initial_scan = existing_count is None
+
             competitor_dict = {
                 "id": competitor.id,
                 "base_url": competitor.base_url,
@@ -61,6 +66,8 @@ async def _scrape_competitor_async(competitor_id: int):
 
             products = await scrape_competitor(
                 competitor_dict,
+                max_pages=settings.DEFAULT_MAX_PAGES,
+                page_delay=settings.DEFAULT_PAGE_DELAY_SECONDS,
                 headless=settings.PLAYWRIGHT_HEADLESS,
                 user_agent=settings.USER_AGENT,
             )
@@ -87,18 +94,37 @@ async def _scrape_competitor_async(competitor_id: int):
             )
             pending_events = events_result.scalars().all()
             if pending_events:
-                from app.models import Product
                 product_ids = [e.product_id for e in pending_events if e.product_id]
                 products_result = await session.execute(
                     select(Product).where(Product.id.in_(product_ids))
                 )
                 products_map = {p.id: p for p in products_result.scalars().all()}
+                if not product_ids:
+                    products_map = {}
                 competitors_map = {competitor.id: competitor}
+                new_product_backlog = sum(1 for event in pending_events if event.event_type == "new_product")
+                if is_initial_scan or new_product_backlog > 25:
+                    for event in pending_events:
+                        if event.event_type == "new_product":
+                            event.notification_sent = True
+                            event.notification_sent_at = datetime.now(timezone.utc)
+                    notify_events = [event for event in pending_events if event.event_type != "new_product"]
+                else:
+                    notify_events = pending_events
+
                 await dispatch_event_notifications(
-                    session, pending_events, competitors_map, products_map,
-                    settings.DISCORD_NOTIFICATIONS_ENABLED
+                    session, notify_events, competitors_map, products_map,
+                    settings.DISCORD_NOTIFICATIONS_ENABLED,
+                    settings.DISCORD_DEFAULT_WEBHOOK_URL,
                 )
                 await session.commit()
+
+            return {
+                "status": "success",
+                "products_found": len(products),
+                "new_products": changes["new_products"],
+                "price_changes": changes["price_changes"],
+            }
 
         except Exception as e:
             logger.error(f"Scrape failed for competitor {competitor_id}: {e}")
@@ -118,9 +144,11 @@ async def _scrape_competitor_async(competitor_id: int):
             session.add(fail_event)
             await session.commit()
 
-            if competitor.discord_webhook_url:
+            failure_webhook_url = competitor.discord_webhook_url or settings.DISCORD_DEFAULT_WEBHOOK_URL
+            if failure_webhook_url:
                 from app.services.notification import notify_scrape_failure
-                await notify_scrape_failure(competitor.discord_webhook_url, competitor.name, str(e))
+                await notify_scrape_failure(failure_webhook_url, competitor.name, str(e))
+            return {"status": "failed", "error": str(e)}
 
 
 @celery_app.task
@@ -211,16 +239,15 @@ async def _send_daily_summary_async():
             "biggest_drops": [],
         }
 
-        # Get all unique discord webhooks
-        comps_result = await session.execute(
-            select(Competitor).where(
-                and_(Competitor.active == True, Competitor.discord_webhook_url.isnot(None))
-            )
-        )
+        # Get all unique Discord webhooks, including the global fallback.
+        comps_result = await session.execute(select(Competitor).where(Competitor.active == True))
         competitors = comps_result.scalars().all()
         seen_webhooks = set()
+        if settings.DISCORD_DEFAULT_WEBHOOK_URL:
+            seen_webhooks.add(settings.DISCORD_DEFAULT_WEBHOOK_URL)
         for comp in competitors:
             if comp.discord_webhook_url and comp.discord_webhook_url not in seen_webhooks:
                 seen_webhooks.add(comp.discord_webhook_url)
-                if settings.DISCORD_NOTIFICATIONS_ENABLED:
-                    await send_daily_summary(comp.discord_webhook_url, summary)
+        if settings.DISCORD_NOTIFICATIONS_ENABLED:
+            for webhook_url in seen_webhooks:
+                await send_daily_summary(webhook_url, summary)

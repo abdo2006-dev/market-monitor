@@ -14,6 +14,7 @@ router = APIRouter(prefix="/api/products", tags=["products"])
 @router.get("", response_model=dict)
 async def list_products(
     competitor_id: Optional[int] = None,
+    category: Optional[str] = None,
     search: Optional[str] = None,
     active: Optional[bool] = None,
     stock_status: Optional[str] = None,
@@ -35,6 +36,8 @@ async def list_products(
         filters.append(Product.competitor_id == competitor_id)
     if active is not None:
         filters.append(Product.active == active)
+    if category:
+        filters.append(Product.category == category)
     if stock_status:
         filters.append(Product.stock_status == stock_status)
     if min_price is not None:

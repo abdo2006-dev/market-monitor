@@ -1,0 +1,16 @@
+.DS_Store
+.env
+.env.local
+.env.*.local
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+node_modules/
+dist/
+
+.venv/
+venv/
+.vercel
+.env*.local

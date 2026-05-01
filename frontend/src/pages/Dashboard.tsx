@@ -1,17 +1,21 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getDashboardSummary } from '../lib/api'
-import { StatCard, Card, Table, Tr, Td, EventBadge, Loading, ErrorState } from '../components/ui'
+import { getDashboardSummary, getCompetitors } from '../lib/api'
+import { StatCard, Card, Table, Tr, Td, EventBadge, Loading, ErrorState, Select } from '../components/ui'
 import { PageHeader } from '../components/layout/Sidebar'
-import { formatPrice, formatDate, timeAgo } from '../lib/utils'
+import { formatPrice, timeAgo } from '../lib/utils'
 
 export default function DashboardPage() {
+  const [competitorFilter, setCompetitorFilter] = useState('')
   const { data, isLoading, error } = useQuery({ queryKey: ['dashboard'], queryFn: getDashboardSummary, refetchInterval: 30_000 })
+  const { data: competitors = [] } = useQuery({ queryKey: ['competitors'], queryFn: getCompetitors })
 
   if (isLoading) return <div style={{ padding: '2rem' }}><Loading /></div>
   if (error) return <div style={{ padding: '2rem' }}><ErrorState message="Failed to load dashboard." /></div>
 
-  const events = data?.latest_events || []
+  const events = (data?.latest_events || []).filter((event: any) =>
+    !competitorFilter || String(event.competitor_id) === competitorFilter
+  )
   const attention = data?.competitors_needing_attention || []
 
   return (
@@ -29,15 +33,22 @@ export default function DashboardPage() {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 350px', gap: 20 }}>
         {/* Latest Events */}
         <Card>
-          <h3 style={{ fontWeight: 700, marginBottom: 16 }}>Latest Events</h3>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 16 }}>
+            <h3 style={{ fontWeight: 700 }}>Latest Events</h3>
+            <Select value={competitorFilter} onChange={e => setCompetitorFilter(e.target.value)} style={{ width: 190 }}>
+              <option value="">All Competitors</option>
+              {competitors.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </Select>
+          </div>
           {events.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '2rem', color: '#8b8fa8' }}>No events yet</div>
           ) : (
-            <Table headers={['Event', 'Competitor', 'Product', 'Details', 'When']}>
+            <Table headers={['Event', 'Competitor', 'Category', 'Product', 'Details', 'When']}>
               {events.slice(0, 15).map((e: any) => (
                 <Tr key={e.id}>
                   <Td><EventBadge type={e.event_type} /></Td>
                   <Td style={{ color: '#e4e4f0', fontWeight: 500 }}>{e.competitor_name}</Td>
+                  <Td style={{ color: '#8b8fa8', fontSize: 12 }}>{e.product_category || '—'}</Td>
                   <Td style={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {e.product_title || '—'}
                   </Td>

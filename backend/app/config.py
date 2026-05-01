@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     DEFAULT_TIMEZONE: str = "UTC"
     DEFAULT_CURRENCY: str = "USD"
     DISCORD_NOTIFICATIONS_ENABLED: bool = True
+    DISCORD_DEFAULT_WEBHOOK_URL: Optional[str] = None
     USER_AGENT: str = "MarketMonitor/1.0 (price monitoring bot)"
     PLAYWRIGHT_HEADLESS: bool = True
     DEFAULT_SCAN_INTERVAL_MINUTES: int = 60
@@ -21,6 +22,8 @@ class Settings(BaseSettings):
     IGNORE_KEYWORDS: str = ""
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
+    RUN_SCANS_INLINE: bool = False
+    CRON_SECRET: Optional[str] = None
 
     class Config:
         env_file = ".env"

@@ -1,13 +1,14 @@
 import React from 'react'
-import { cn, EVENT_COLORS, EVENT_LABELS, STOCK_LABELS } from '../lib/utils'
+import { cn, EVENT_COLORS, EVENT_LABELS, STOCK_LABELS } from '../../lib/utils'
 
 // ── Card ─────────────────────────────────────────────────────────────────────
 
-export function Card({ children, className }: { children: React.ReactNode; className?: string }) {
+export function Card({ children, className, style }: { children: React.ReactNode; className?: string; style?: React.CSSProperties }) {
   return (
     <div className={cn('card', className)} style={{
       background: '#1a1d2e', border: '1px solid #2d3048', borderRadius: 12,
       padding: '1.25rem', boxShadow: '0 4px 24px rgba(0,0,0,0.2)',
+      ...style,
     }}>
       {children}
     </div>

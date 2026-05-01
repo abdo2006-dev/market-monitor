@@ -14,6 +14,7 @@ router = APIRouter(prefix="/api/events", tags=["events"])
 async def list_events(
     event_type: Optional[str] = None,
     competitor_id: Optional[int] = None,
+    category: Optional[str] = None,
     date_from: Optional[datetime] = None,
     date_to: Optional[datetime] = None,
     notification_sent: Optional[bool] = None,
@@ -22,7 +23,7 @@ async def list_events(
     db: AsyncSession = Depends(get_db),
 ):
     query = (
-        select(Event, Competitor.name.label("cname"), Product.title.label("ptitle"))
+        select(Event, Competitor.name.label("cname"), Product.title.label("ptitle"), Product.category.label("pcategory"))
         .join(Competitor, Event.competitor_id == Competitor.id)
         .outerjoin(Product, Event.product_id == Product.id)
     )
@@ -32,6 +33,8 @@ async def list_events(
         filters.append(Event.event_type == event_type)
     if competitor_id:
         filters.append(Event.competitor_id == competitor_id)
+    if category:
+        filters.append(Product.category == category)
     if date_from:
         filters.append(Event.detected_at >= date_from)
     if date_to:
@@ -53,10 +56,15 @@ async def list_events(
 
     items = []
     for row in rows:
-        event, cname, ptitle = row
+        event, cname, ptitle, pcategory = row
         d = EventOut.model_validate(event)
         d.competitor_name = cname
         d.product_title = ptitle
+        d.product_category = event.new_value.get("category") if isinstance(event.new_value, dict) else None
+        if not d.product_category and isinstance(event.old_value, dict):
+            d.product_category = event.old_value.get("category")
+        if not d.product_category:
+            d.product_category = pcategory
         items.append(d.model_dump())
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}

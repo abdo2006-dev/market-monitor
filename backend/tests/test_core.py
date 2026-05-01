@@ -159,3 +159,58 @@ class TestScraperParsing:
         assert _detect_stock(None) == "unknown"
         assert _detect_stock("") == "unknown"
         assert _detect_stock("Some random text") == "unknown"
+
+
+# ── Notification Routing Tests ───────────────────────────────────────────────
+
+class TestNotificationRouting:
+    def test_competitor_webhook_takes_priority(self):
+        from types import SimpleNamespace
+        from app.services.notification import get_notification_webhook_url
+
+        competitor = SimpleNamespace(discord_webhook_url="https://example.com/competitor")
+        result = get_notification_webhook_url(competitor, "https://example.com/default")
+        assert result == "https://example.com/competitor"
+
+    def test_default_webhook_used_when_competitor_has_none(self):
+        from types import SimpleNamespace
+        from app.services.notification import get_notification_webhook_url
+
+        competitor = SimpleNamespace(discord_webhook_url=None)
+        result = get_notification_webhook_url(competitor, "https://example.com/default")
+        assert result == "https://example.com/default"
+
+
+# ── Shopify / Search Tests ───────────────────────────────────────────────────
+
+class TestShopifyScraper:
+    def test_extract_shopify_product_category(self):
+        from app.services.scraper import _extract_shopify_product
+
+        raw = {
+            "id": 1,
+            "title": "Rainbow Shiny Pet",
+            "handle": "rainbow-shiny-pet",
+            "variants": [{"id": 2, "available": True, "price": "3.50"}],
+            "images": [{"src": "https://cdn.example/pet.png"}],
+        }
+        product = _extract_shopify_product(raw, "https://example.com", "Adopt Me")
+        assert product["category"] == "Adopt Me"
+        assert product["price"] == 3.50
+        assert product["url"] == "https://example.com/products/rainbow-shiny-pet"
+
+
+class TestFuzzySearch:
+    def test_match_score_handles_imperfect_spelling(self):
+        from app.api.search_dashboard_settings import _match_score
+
+        assert _match_score("rainbow pet", "rainbow shiny pet") > 0.5
+        assert _match_score("rainbo shiny", "rainbow shiny pet") > 0.4
+
+    def test_comparison_alias_removes_weapon_descriptor(self):
+        from app.api.search_dashboard_settings import _comparison_aliases, _comparison_score
+
+        aliases = _comparison_aliases("chill knife")
+        assert "chill" in aliases
+        assert _comparison_score("chill", "chill") > 0.9
+        assert _comparison_score("chill", "chillin chili") < 0.86

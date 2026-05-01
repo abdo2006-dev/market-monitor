@@ -7,6 +7,7 @@ const api = axios.create({
 // Competitors
 export const getCompetitors = () => api.get('/competitors').then(r => r.data)
 export const createCompetitor = (data: any) => api.post('/competitors', data).then(r => r.data)
+export const seedDefaultCompetitors = () => api.post('/competitors/seed-defaults').then(r => r.data)
 export const updateCompetitor = (id: number, data: any) => api.put(`/competitors/${id}`, data).then(r => r.data)
 export const deleteCompetitor = (id: number) => api.delete(`/competitors/${id}`)
 export const scanNow = (id: number) => api.post(`/competitors/${id}/scan-now`).then(r => r.data)
@@ -22,6 +23,8 @@ export const getEvents = (params: any) => api.get('/events', { params }).then(r 
 
 // Search
 export const searchProducts = (params: any) => api.get('/search/products', { params }).then(r => r.data)
+export const getSearchSuggestions = (params: any) => api.get('/search/suggestions', { params }).then(r => r.data)
+export const compareProduct = (params: any) => api.get('/search/compare', { params }).then(r => r.data)
 
 // Dashboard
 export const getDashboardSummary = () => api.get('/dashboard/summary').then(r => r.data)

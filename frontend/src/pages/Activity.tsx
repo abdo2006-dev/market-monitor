@@ -124,6 +124,9 @@ export default function ActivityPage() {
                     {/* Competitor */}
                     <div style={{ minWidth: 120, color: '#8b8fa8', fontSize: 13 }}>
                       {event.competitor_name}
+                      {event.product_category && (
+                        <div style={{ color: '#6366f1', fontSize: 12, marginTop: 2 }}>{event.product_category}</div>
+                      )}
                     </div>
 
                     {/* Product */}

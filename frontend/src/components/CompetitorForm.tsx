@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Modal, Button, Input, Select, Textarea } from '../ui'
+import { Modal, Button, Input, Textarea } from './ui'
 
 const DEFAULT_SELECTOR = JSON.stringify({
   "product_card": ".product-card",

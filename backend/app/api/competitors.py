@@ -5,6 +5,8 @@ from typing import List
 from app.database import get_db
 from app.models import Competitor
 from app.schemas import CompetitorCreate, CompetitorUpdate, CompetitorOut
+from app.config import settings
+from app.services.default_competitors import default_competitor_payloads
 
 router = APIRouter(prefix="/api/competitors", tags=["competitors"])
 
@@ -22,6 +24,23 @@ async def create_competitor(data: CompetitorCreate, db: AsyncSession = Depends(g
     await db.flush()
     await db.refresh(competitor)
     return competitor
+
+
+@router.post("/seed-defaults", response_model=List[CompetitorOut])
+async def seed_default_competitors(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Competitor.base_url))
+    existing_urls = {row[0].rstrip("/") for row in result.all()}
+    created = []
+    for payload in default_competitor_payloads():
+        if payload["base_url"].rstrip("/") in existing_urls:
+            continue
+        competitor = Competitor(**payload)
+        db.add(competitor)
+        created.append(competitor)
+    await db.flush()
+    for competitor in created:
+        await db.refresh(competitor)
+    return created
 
 
 @router.get("/{competitor_id}", response_model=CompetitorOut)
@@ -63,6 +82,11 @@ async def scan_now(competitor_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Competitor not found")
     if not competitor.active:
         raise HTTPException(status_code=400, detail="Competitor is inactive")
+
+    if settings.RUN_SCANS_INLINE or competitor.scrape_type == "shopify_json":
+        from app.workers.tasks import _scrape_competitor_async
+        result = await _scrape_competitor_async(competitor_id)
+        return {"message": "Scan completed", "result": result}
 
     from app.workers.tasks import scrape_competitor_task
     task = scrape_competitor_task.delay(competitor_id)
