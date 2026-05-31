@@ -217,6 +217,86 @@ class TestShopifyScraper:
         assert product["price"] == 3.50
         assert product["url"] == "https://example.com/products/rainbow-shiny-pet"
 
+    def test_extract_storefront_graphql_product(self):
+        from app.services.scraper import _extract_storefront_product
+
+        raw = {
+            "id": "gid://shopify/Product/10",
+            "title": "Chill",
+            "handle": "chill",
+            "vendor": "Murder Mystery 2",
+            "productType": "Knives",
+            "images": {"edges": [{"node": {"url": "https://cdn.example/chill.png"}}]},
+            "variants": {
+                "edges": [
+                    {
+                        "node": {
+                            "id": "gid://shopify/ProductVariant/20",
+                            "sku": "CHILL",
+                            "availableForSale": True,
+                            "price": {"amount": "1.49", "currencyCode": "USD"},
+                        }
+                    }
+                ]
+            },
+        }
+
+        product = _extract_storefront_product(raw, "https://example.com", "MM2")
+        assert product["title"] == "Chill"
+        assert product["price"] == 1.49
+        assert product["url"] == "https://example.com/product/chill"
+        assert product["external_id"] == "10:20"
+        assert product["category"] == "MM2"
+
+    def test_product_urls_from_sitemap_accepts_product_and_products_paths(self):
+        from app.services.scraper import _product_urls_from_sitemap
+
+        sitemap = """
+        <urlset>
+          <url><loc>https://example.com/product/chill</loc></url>
+          <url><loc>https://example.com/products/harvester</loc></url>
+          <url><loc>https://other.example/product/ignored</loc></url>
+          <url><loc>https://example.com/blog/post</loc></url>
+        </urlset>
+        """
+
+        assert _product_urls_from_sitemap(sitemap, "https://example.com") == [
+            "https://example.com/product/chill",
+            "https://example.com/products/harvester",
+        ]
+
+    def test_extract_storefront_html_product_uses_json_ld_and_gids(self):
+        from app.services.scraper import _extract_product_from_storefront_html
+
+        body = """
+        <html><head>
+          <script type="application/ld+json">
+          {
+            "@type": "Product",
+            "name": "Chill",
+            "brand": {"name": "Murder Mystery 2"},
+            "sku": "gid://shopify/ProductVariant/20",
+            "image": ["https://cdn.example/chill.png"],
+            "offers": {
+              "price": "1.49",
+              "priceCurrency": "USD",
+              "availability": "https://schema.org/InStock"
+            }
+          }
+          </script>
+        </head><body>
+          initialProduct:$R[14]={id:"gid://shopify/Product/10",title:"Chill"}
+          variants:{edges:[{node:{id:"gid://shopify/ProductVariant/20",availableForSale:!0}}]}
+        </body></html>
+        """
+
+        product = _extract_product_from_storefront_html(body, "https://example.com/product/chill", "https://example.com")
+        assert product["title"] == "Chill"
+        assert product["price"] == 1.49
+        assert product["stock_status"] == "in_stock"
+        assert product["external_id"] == "10:20"
+        assert product["category"] == "Murder Mystery 2"
+
 
 class TestCompetitorDefaults:
     def test_base_url_only_competitor_uses_shopify_catalog(self):
