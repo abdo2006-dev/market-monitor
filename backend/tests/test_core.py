@@ -248,6 +248,39 @@ class TestShopifyScraper:
         assert product["external_id"] == "10:20"
         assert product["category"] == "MM2"
 
+    def test_storefront_graphql_config_is_discovered_from_assets(self):
+        from app.services.scraper import _storefront_graphql_config_from_assets
+
+        assets = '''
+        const apiVersion="2025-07", shopDomain="custom-shop.myshopify.com";
+        const endpoint=`https://${shopDomain}/api/${apiVersion}/graphql.json`;
+        const token="abc123abc123abc123abc123abc123ab";
+        fetch(endpoint,{headers:{"X-Shopify-Storefront-Access-Token":token}});
+        '''
+
+        config = _storefront_graphql_config_from_assets(
+            "https://example.com",
+            {},
+            assets,
+            ["mm2", "adopt-me"],
+        )
+
+        assert config["shop_domain"] == "custom-shop.myshopify.com"
+        assert config["access_token"] == "abc123abc123abc123abc123abc123ab"
+        assert config["api_version"] == "2025-07"
+        assert config["collection_handles"] == ["mm2", "adopt-me"]
+
+    def test_collection_handles_from_text(self):
+        from app.services.scraper import _collection_handles_from_text
+
+        body = """
+        <loc>https://example.com/collections/adopt-me</loc>
+        <a href="/collections/steal-a-brainrot">Game</a>
+        <a href="/collections/all">All</a>
+        """
+
+        assert _collection_handles_from_text(body) == ["adopt-me", "steal-a-brainrot"]
+
     def test_product_urls_from_sitemap_accepts_product_and_products_paths(self):
         from app.services.scraper import _product_urls_from_sitemap
 

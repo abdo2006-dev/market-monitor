@@ -188,7 +188,7 @@ async def _scrape_custom_storefront_fallback(session, base_url: str, selector_co
 
 
 async def _scrape_shopify_storefront_graphql(session, base_url: str, selector_config: dict) -> list[dict]:
-    config = _storefront_graphql_config(base_url, selector_config)
+    config = await _storefront_graphql_config(session, base_url, selector_config)
     if not config:
         return []
 
@@ -249,7 +249,7 @@ async def _scrape_shopify_storefront_graphql(session, base_url: str, selector_co
     return products
 
 
-def _storefront_graphql_config(base_url: str, selector_config: dict) -> Optional[dict]:
+async def _storefront_graphql_config(session, base_url: str, selector_config: dict) -> Optional[dict]:
     configured = selector_config.get("storefront_graphql") or {}
     if configured.get("shop_domain") and configured.get("access_token"):
         return {
@@ -260,16 +260,142 @@ def _storefront_graphql_config(base_url: str, selector_config: dict) -> Optional
             "max_products": configured.get("max_products", 500),
         }
 
-    host = urlparse(base_url).netloc.lower().removeprefix("www.")
-    if host == "bloxcrews.com":
-        return {
-            "shop_domain": "05ce1a-4c.myshopify.com",
-            "access_token": "b4945c4d79c27891c0ab9c3d95daf9d8",
-            "api_version": "2025-07",
-            "collection_handles": ["steal-a-brainrot", "adopt-me"],
-            "max_products": 500,
-        }
-    return None
+    if selector_config.get("auto_discover_storefront_graphql", True) is False:
+        return None
+
+    handles = selector_config.get("collection_handles") or await _discover_collection_handles(session, base_url)
+    if not handles:
+        return None
+
+    assets_text = await _discover_storefront_assets_text(session, base_url)
+    return _storefront_graphql_config_from_assets(base_url, selector_config, assets_text, handles)
+
+
+def _storefront_graphql_config_from_assets(base_url: str, selector_config: dict, assets_text: str,
+                                           collection_handles: list[str]) -> Optional[dict]:
+    shop_domain = _regex_first(assets_text, r'["\']([a-z0-9][a-z0-9-]*\.myshopify\.com)["\']')
+    if not shop_domain or "X-Shopify-Storefront-Access-Token" not in assets_text:
+        return None
+
+    access_token = _storefront_access_token_from_assets(assets_text)
+    if not access_token:
+        return None
+
+    api_version = _api_version_from_assets(assets_text) or "2025-07"
+    return {
+        "shop_domain": shop_domain,
+        "access_token": access_token,
+        "api_version": api_version,
+        "collection_handles": collection_handles,
+        "max_products": selector_config.get("max_products", 500),
+    }
+
+
+def _storefront_access_token_from_assets(assets_text: str) -> Optional[str]:
+    header_match = re.search(
+        r'X-Shopify-Storefront-Access-Token["\']?\s*:\s*([A-Za-z_$][\w$]*|["\'][^"\']+["\'])',
+        assets_text or "",
+    )
+    if header_match:
+        raw_value = header_match.group(1).strip()
+        if raw_value[0] in "\"'":
+            return raw_value.strip("\"'")
+        token_match = re.search(rf'\b{re.escape(raw_value)}\s*=\s*["\']([^"\']+)["\']', assets_text)
+        if token_match:
+            return token_match.group(1)
+
+    token_match = re.search(r'["\']([a-f0-9]{32,})["\']', assets_text or "", re.IGNORECASE)
+    return token_match.group(1) if token_match else None
+
+
+def _api_version_from_assets(assets_text: str) -> Optional[str]:
+    graphql_index = (assets_text or "").find("graphql.json")
+    if graphql_index >= 0:
+        nearby = assets_text[max(0, graphql_index - 300):graphql_index + 100]
+        version = _regex_first(nearby, r'["\'](20\d{2}-\d{2})["\']')
+        if version:
+            return version
+    return _regex_first(assets_text, r'api/([0-9]{4}-[0-9]{2})/graphql\.json')
+
+
+async def _discover_collection_handles(session, base_url: str) -> list[str]:
+    handles = await _collection_handles_from_sitemap_url(session, f"{base_url}/sitemap.xml", base_url, limit=50)
+    if handles:
+        return handles
+    try:
+        async with session.get(base_url, headers={"Accept": "text/html"}) as resp:
+            if resp.status >= 400:
+                return []
+            body = await resp.text()
+    except Exception:
+        return []
+    return _collection_handles_from_text(body)
+
+
+async def _collection_handles_from_sitemap_url(session, sitemap_url: str, base_url: str, limit: int) -> list[str]:
+    try:
+        async with session.get(sitemap_url, headers={"Accept": "application/xml, text/xml, text/html"}) as resp:
+            if resp.status >= 400:
+                return []
+            body = await resp.text()
+    except Exception:
+        return []
+
+    handles = _collection_handles_from_text(body)
+    if handles:
+        return handles[:limit]
+
+    nested_sitemaps = [
+        loc for loc in _sitemap_locs(body)
+        if loc.endswith(".xml") and urlparse(loc).netloc == urlparse(base_url).netloc
+    ][:10]
+    nested_handles = []
+    for nested in nested_sitemaps:
+        nested_handles.extend(await _collection_handles_from_sitemap_url(session, nested, base_url, limit - len(nested_handles)))
+        if len(nested_handles) >= limit:
+            break
+    return list(dict.fromkeys(nested_handles))[:limit]
+
+
+def _collection_handles_from_text(text: str) -> list[str]:
+    ignored = {"all", "frontpage", "home-page", "new", "best-sellers"}
+    handles = [
+        html.unescape(match.group(1)).strip("/")
+        for match in re.finditer(r"/collections/([A-Za-z0-9][A-Za-z0-9_-]*)", text or "")
+    ]
+    return [handle for handle in dict.fromkeys(handles) if handle not in ignored]
+
+
+async def _discover_storefront_assets_text(session, base_url: str) -> str:
+    try:
+        async with session.get(base_url, headers={"Accept": "text/html"}) as resp:
+            if resp.status >= 400:
+                return ""
+            body = await resp.text()
+    except Exception:
+        return ""
+
+    asset_urls = _javascript_asset_urls(body, base_url)
+    texts = []
+    for asset_url in asset_urls[:12]:
+        try:
+            async with session.get(asset_url, headers={"Accept": "application/javascript, text/javascript, */*"}) as resp:
+                if resp.status >= 400:
+                    continue
+                text = await resp.text()
+        except Exception:
+            continue
+        texts.append(text)
+        if "X-Shopify-Storefront-Access-Token" in text and "graphql.json" in text:
+            break
+    return "\n".join(texts)
+
+
+def _javascript_asset_urls(html_body: str, base_url: str) -> list[str]:
+    urls = []
+    for match in re.finditer(r'(?:src|href)=["\']([^"\']+\.js(?:\?[^"\']*)?)["\']', html_body or "", re.IGNORECASE):
+        urls.append(normalize_url(html.unescape(match.group(1)), base_url))
+    return list(dict.fromkeys(urls))
 
 
 _STOREFRONT_PRODUCT_FIELDS = """
