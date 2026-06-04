@@ -16,6 +16,7 @@ type SalesCompetitor = {
   competitor_id: number
   competitor_name: string
   inferred_sold_count: number
+  removed_count: number
   unique_products_count: number
   last_signal_at: string | null
 }
@@ -40,6 +41,7 @@ type SalesTrendsResponse = {
   since: string
   until: string
   total_inferred_sold: number
+  total_removed: number
   competitors: SalesCompetitor[]
   top_products: SalesProduct[]
   note: string
@@ -85,10 +87,7 @@ export default function SalesTrendsPage() {
 
   return (
     <div style={{ padding: '1.5rem' }}>
-      <PageHeader
-        title="Sales Signals"
-        subtitle="Rank competitors and products by likely sales movement from scan events."
-      />
+      <PageHeader title="Sales Signals" subtitle="Rank competitors and products by stock-out movement from scan events." />
 
       <Card style={{ marginBottom: '1rem', padding: '1rem' }}>
         <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
@@ -144,16 +143,16 @@ export default function SalesTrendsPage() {
             gap: '1rem',
             marginBottom: '1rem',
           }}>
-            <StatCard label="Inferred Sales" value={data.total_inferred_sold} icon="📈" color="#22c55e" />
+            <StatCard label="Likely Sold" value={data.total_inferred_sold} icon="📈" color="#22c55e" />
+            <StatCard label="Removed" value={data.total_removed} icon="🧭" color="#f97316" />
             <StatCard label="Sites With Signals" value={data.competitors.filter(c => c.inferred_sold_count > 0).length} icon="🏢" color="#38bdf8" />
             <StatCard label="Top Site" value={topSite?.competitor_name || 'N/A'} icon="🏆" color="#f59e0b" />
-            <StatCard label="Top Product" value={topProduct?.title || 'N/A'} icon="📦" color="#a855f7" />
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 0.85fr) minmax(420px, 1.4fr)', gap: '1rem' }}>
             <Card>
               <h2 style={{ fontSize: 16, fontWeight: 700, color: '#e4e4f0', marginBottom: 12 }}>By Competitor</h2>
-              <Table headers={['Site', 'Signals', 'Products', 'Last Signal']}>
+              <Table headers={['Site', 'Likely Sold', 'Removed', 'Products', 'Last Signal']}>
                 {data.competitors.map(c => (
                   <Tr key={c.competitor_id}>
                     <Td>
@@ -175,6 +174,9 @@ export default function SalesTrendsPage() {
                     <Td style={{ color: c.inferred_sold_count ? '#22c55e' : '#8b8fa8', fontWeight: 700 }}>
                       {c.inferred_sold_count}
                     </Td>
+                    <Td style={{ color: c.removed_count ? '#f97316' : '#8b8fa8', fontWeight: 700 }}>
+                      {c.removed_count}
+                    </Td>
                     <Td>{c.unique_products_count}</Td>
                     <Td>{c.last_signal_at ? formatDate(c.last_signal_at) : 'N/A'}</Td>
                   </Tr>
@@ -183,7 +185,7 @@ export default function SalesTrendsPage() {
             </Card>
 
             <Card>
-              <h2 style={{ fontSize: 16, fontWeight: 700, color: '#e4e4f0', marginBottom: 12 }}>Top Products</h2>
+              <h2 style={{ fontSize: 16, fontWeight: 700, color: '#e4e4f0', marginBottom: 12 }}>Top Stock-Out Products</h2>
               {data.top_products.length === 0 ? (
                 <EmptyState
                   icon="📭"

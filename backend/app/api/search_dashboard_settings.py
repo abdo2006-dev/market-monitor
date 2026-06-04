@@ -13,7 +13,8 @@ search_router = APIRouter(prefix="/api/search", tags=["search"])
 dashboard_router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 settings_router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-INFERRED_SALE_EVENT_TYPES = ("stock_out", "product_removed")
+INFERRED_SALE_EVENT_TYPES = ("stock_out",)
+REMOVED_PRODUCT_EVENT_TYPES = ("product_removed",)
 SALES_PERIODS = {
     "day": timedelta(days=1),
     "week": timedelta(days=7),
@@ -346,8 +347,13 @@ async def sales_trends(
         Event.event_type.in_(INFERRED_SALE_EVENT_TYPES),
         Event.detected_at >= since,
     ]
+    removed_filters = [
+        Event.event_type.in_(REMOVED_PRODUCT_EVENT_TYPES),
+        Event.detected_at >= since,
+    ]
     if competitor_id is not None:
         filters.append(Event.competitor_id == competitor_id)
+        removed_filters.append(Event.competitor_id == competitor_id)
 
     competitor_rows = (await db.execute(
         select(
@@ -366,11 +372,24 @@ async def sales_trends(
     active_competitors = (await db.execute(
         select(Competitor).where(Competitor.active == True).order_by(Competitor.name.asc())
     )).scalars().all()
+    removed_rows = (await db.execute(
+        select(
+            Event.competitor_id,
+            func.count(Event.id).label("removed_count"),
+        )
+        .where(and_(*removed_filters))
+        .group_by(Event.competitor_id)
+    )).all()
+    removed_by_competitor = {
+        row.competitor_id: int(row.removed_count or 0)
+        for row in removed_rows
+    }
     summary_by_competitor = {
         row.id: {
             "competitor_id": row.id,
             "competitor_name": row.name,
             "inferred_sold_count": int(row.inferred_sold_count or 0),
+            "removed_count": removed_by_competitor.get(row.id, 0),
             "unique_products_count": int(row.unique_products_count or 0),
             "last_signal_at": row.last_signal_at,
         }
@@ -384,6 +403,7 @@ async def sales_trends(
             "competitor_id": competitor.id,
             "competitor_name": competitor.name,
             "inferred_sold_count": 0,
+            "removed_count": removed_by_competitor.get(competitor.id, 0),
             "unique_products_count": 0,
             "last_signal_at": None,
         }))
@@ -442,15 +462,18 @@ async def sales_trends(
     ]
 
     total_signals = sum(item["inferred_sold_count"] for item in competitors)
+    total_removed = sum(item["removed_count"] for item in competitors)
     return {
         "period": period,
         "since": since,
         "until": now,
         "signal_types": list(INFERRED_SALE_EVENT_TYPES),
+        "removed_signal_types": list(REMOVED_PRODUCT_EVENT_TYPES),
         "total_inferred_sold": total_signals,
+        "total_removed": total_removed,
         "competitors": competitors,
         "top_products": top_products,
-        "note": "Inferred sales count stock-out and product-removed events. It is a demand signal, not confirmed order quantity.",
+        "note": "Inferred sales count stock-out events. Removed products are shown separately as a weaker catalog-change signal, not confirmed sales.",
     }
 
 
