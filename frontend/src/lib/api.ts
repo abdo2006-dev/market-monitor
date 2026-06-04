@@ -28,6 +28,7 @@ export const compareProduct = (params: any) => api.get('/search/compare', { para
 
 // Dashboard
 export const getDashboardSummary = () => api.get('/dashboard/summary').then(r => r.data)
+export const getSalesTrends = (params: any) => api.get('/dashboard/sales-trends', { params }).then(r => r.data)
 
 // Settings
 export const getSettings = () => api.get('/settings').then(r => r.data)

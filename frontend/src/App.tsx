@@ -6,6 +6,7 @@ import CompetitorsPage from './pages/Competitors'
 import ProductsPage from './pages/Products'
 import ProductDetailPage from './pages/ProductDetail'
 import MarketSearchPage from './pages/MarketSearch'
+import SalesTrendsPage from './pages/SalesTrends'
 import ActivityPage from './pages/Activity'
 import SettingsPage from './pages/Settings'
 
@@ -18,6 +19,7 @@ export default function App() {
         <Route path="/products" element={<ProductsPage />} />
         <Route path="/products/:id" element={<ProductDetailPage />} />
         <Route path="/search" element={<MarketSearchPage />} />
+        <Route path="/sales" element={<SalesTrendsPage />} />
         <Route path="/activity" element={<ActivityPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Routes>

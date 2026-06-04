@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, or_
 from typing import Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from difflib import SequenceMatcher
 from app.database import get_db
 from app.models import Product, Competitor, Event, ScrapeRun, AppSettings
@@ -12,6 +12,13 @@ from app.utils.text_normalizer import normalize_title
 search_router = APIRouter(prefix="/api/search", tags=["search"])
 dashboard_router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 settings_router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+INFERRED_SALE_EVENT_TYPES = ("stock_out", "product_removed")
+SALES_PERIODS = {
+    "day": timedelta(days=1),
+    "week": timedelta(days=7),
+    "month": timedelta(days=30),
+}
 
 
 # ── Search ────────────────────────────────────────────────────────────────────
@@ -323,6 +330,127 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db)):
         "failed_scans_today": failed_scans_today,
         "latest_events": latest_events,
         "competitors_needing_attention": competitors_needing,
+    }
+
+
+@dashboard_router.get("/sales-trends")
+async def sales_trends(
+    period: str = Query("day", pattern="^(day|week|month)$"),
+    competitor_id: Optional[int] = None,
+    limit: int = Query(25, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    now = datetime.now(timezone.utc)
+    since = now - SALES_PERIODS[period]
+    filters = [
+        Event.event_type.in_(INFERRED_SALE_EVENT_TYPES),
+        Event.detected_at >= since,
+    ]
+    if competitor_id is not None:
+        filters.append(Event.competitor_id == competitor_id)
+
+    competitor_rows = (await db.execute(
+        select(
+            Competitor.id,
+            Competitor.name,
+            func.count(Event.id).label("inferred_sold_count"),
+            func.count(func.distinct(Event.product_id)).label("unique_products_count"),
+            func.max(Event.detected_at).label("last_signal_at"),
+        )
+        .join(Event, Event.competitor_id == Competitor.id)
+        .where(and_(*filters))
+        .group_by(Competitor.id, Competitor.name)
+        .order_by(func.count(Event.id).desc(), Competitor.name.asc())
+    )).all()
+
+    active_competitors = (await db.execute(
+        select(Competitor).where(Competitor.active == True).order_by(Competitor.name.asc())
+    )).scalars().all()
+    summary_by_competitor = {
+        row.id: {
+            "competitor_id": row.id,
+            "competitor_name": row.name,
+            "inferred_sold_count": int(row.inferred_sold_count or 0),
+            "unique_products_count": int(row.unique_products_count or 0),
+            "last_signal_at": row.last_signal_at,
+        }
+        for row in competitor_rows
+    }
+    competitors = []
+    for competitor in active_competitors:
+        if competitor_id is not None and competitor.id != competitor_id:
+            continue
+        competitors.append(summary_by_competitor.get(competitor.id, {
+            "competitor_id": competitor.id,
+            "competitor_name": competitor.name,
+            "inferred_sold_count": 0,
+            "unique_products_count": 0,
+            "last_signal_at": None,
+        }))
+    competitors.sort(key=lambda item: (-item["inferred_sold_count"], item["competitor_name"]))
+
+    product_rows = (await db.execute(
+        select(
+            Product.id.label("product_id"),
+            Product.title,
+            Product.category,
+            Product.url,
+            Product.image_url,
+            Product.current_price,
+            Product.currency,
+            Product.stock_status,
+            Product.competitor_id,
+            Competitor.name.label("competitor_name"),
+            func.count(Event.id).label("inferred_sold_count"),
+            func.max(Event.detected_at).label("last_signal_at"),
+        )
+        .join(Product, Event.product_id == Product.id)
+        .join(Competitor, Product.competitor_id == Competitor.id)
+        .where(and_(*filters))
+        .group_by(
+            Product.id,
+            Product.title,
+            Product.category,
+            Product.url,
+            Product.image_url,
+            Product.current_price,
+            Product.currency,
+            Product.stock_status,
+            Product.competitor_id,
+            Competitor.name,
+        )
+        .order_by(func.count(Event.id).desc(), func.max(Event.detected_at).desc(), Product.title.asc())
+        .limit(limit)
+    )).all()
+
+    top_products = [
+        {
+            "product_id": row.product_id,
+            "title": row.title,
+            "category": row.category,
+            "url": row.url,
+            "image_url": row.image_url,
+            "current_price": float(row.current_price) if row.current_price is not None else None,
+            "currency": row.currency,
+            "stock_status": row.stock_status,
+            "competitor_id": row.competitor_id,
+            "competitor_name": row.competitor_name,
+            "inferred_sold_count": int(row.inferred_sold_count or 0),
+            "last_signal_at": row.last_signal_at,
+        }
+        for row in product_rows
+    ]
+
+    total_signals = sum(item["inferred_sold_count"] for item in competitors)
+    return {
+        "period": period,
+        "since": since,
+        "until": now,
+        "signal_types": list(INFERRED_SALE_EVENT_TYPES),
+        "total_inferred_sold": total_signals,
+        "competitors": competitors,
+        "top_products": top_products,
+        "note": "Inferred sales count stock-out and product-removed events. It is a demand signal, not confirmed order quantity.",
     }
 
 
