@@ -5,7 +5,7 @@ import logging
 import re
 import ssl
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 from app.utils.price_parser import parse_price
 from app.utils.text_normalizer import normalize_url
@@ -39,6 +39,8 @@ async def scrape_competitor(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
     """
     scrape_type = competitor.get("scrape_type", "generic_selector")
     listing_urls = competitor.get("listing_urls", [])
+    if scrape_type == "salla_json":
+        return await scrape_salla_json(competitor, max_pages=max_pages, user_agent=user_agent)
     if scrape_type == "shopify_json" or (scrape_type == "generic_selector" and not listing_urls):
         return await scrape_shopify_json(competitor, max_pages=max_pages, user_agent=user_agent)
 
@@ -174,6 +176,75 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
                 selector_config,
                 max_pages=max_pages,
             )
+
+    return all_products
+
+
+async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT,
+                            user_agent: str = "MarketMonitor/1.0") -> list[dict]:
+    """Scrape Salla storefront category product APIs."""
+    import aiohttp
+
+    base_url = competitor.get("base_url", "").rstrip("/")
+    selector_config = competitor.get("selector_config", {}) or {}
+    listing_urls = competitor.get("listing_urls") or []
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/json, text/html;q=0.9",
+        "Referer": listing_urls[0] if listing_urls else base_url,
+    }
+    timeout_seconds = selector_config.get("request_timeout_seconds", 30)
+    per_page = min(int(selector_config.get("per_page") or 32), 32)
+    source = selector_config.get("source") or "categories"
+    category_ids = _salla_category_ids(selector_config, listing_urls)
+    all_products = []
+    seen = set()
+
+    connector = _aiohttp_connector(aiohttp)
+    async with aiohttp.ClientSession(
+        headers=headers,
+        timeout=aiohttp.ClientTimeout(total=timeout_seconds),
+        connector=connector,
+    ) as session:
+        if not category_ids and listing_urls:
+            category_ids = await _discover_salla_category_ids(session, listing_urls, base_url)
+        if not category_ids:
+            logger.warning("No Salla category id found for %s", base_url)
+            return []
+
+        for category_id in category_ids:
+            locale = _salla_locale(selector_config, listing_urls, base_url)
+            next_url = _salla_products_api_url(base_url, locale, source, category_id, per_page)
+            category_name = None
+
+            for _ in range(max_pages):
+                try:
+                    async with session.get(next_url) as resp:
+                        if resp.status >= 400:
+                            logger.warning("Salla JSON returned %s for %s", resp.status, next_url)
+                            break
+                        data = await resp.json(content_type=None)
+                except Exception as e:
+                    logger.warning("Could not fetch Salla JSON %s: %s", next_url, e)
+                    break
+
+                raw_products = data.get("data") or []
+                if not raw_products:
+                    break
+
+                for raw in raw_products:
+                    product = _extract_salla_product(raw, base_url, category_name)
+                    category_name = category_name or product.get("category") if product else category_name
+                    key = product.get("external_id") or product.get("url") if product else None
+                    if product and key not in seen:
+                        seen.add(key)
+                        all_products.append(product)
+
+                cursor = data.get("cursor") or {}
+                next_url = cursor.get("next")
+                if not next_url:
+                    break
+                next_url = _localize_salla_api_url(next_url, locale)
 
     return all_products
 
@@ -746,6 +817,126 @@ def _extract_shopify_product(raw: dict, base_url: str, category: Optional[str]) 
         "external_id": f"{product_id}:{variant_id}" if variant_id else str(product_id),
         "category": category or raw.get("vendor") or raw.get("product_type") or "Uncategorized",
     }
+
+
+def _extract_salla_product(raw: dict, base_url: str, category: Optional[str] = None) -> Optional[dict]:
+    title = (raw.get("name") or raw.get("title") or "").strip()
+    product_url = raw.get("url") or raw.get("custom_url")
+    if not title or not product_url:
+        return None
+
+    raw_price = raw.get("price")
+    price, currency = parse_price(str(raw_price) if raw_price is not None else None, raw.get("currency") or "SAR")
+    image = raw.get("image") or {}
+    image_url = image.get("url") if isinstance(image, dict) else image
+    if not image_url:
+        image_url = raw.get("original_image")
+
+    stock_status = "unknown"
+    if raw.get("is_out_of_stock") is True or raw.get("is_available") is False:
+        stock_status = "out_of_stock"
+    elif raw.get("is_available") is True or raw.get("status") == "sale":
+        stock_status = "in_stock"
+
+    raw_category = raw.get("category") or {}
+    category_name = raw_category.get("name") if isinstance(raw_category, dict) else raw_category
+
+    return {
+        "title": html.unescape(title),
+        "price": price,
+        "currency": currency,
+        "url": normalize_url(product_url, base_url),
+        "image_url": normalize_url(image_url, base_url) if image_url else None,
+        "stock_status": stock_status,
+        "sku": raw.get("sku"),
+        "external_id": str(raw.get("id")) if raw.get("id") is not None else None,
+        "category": html.unescape(category or category_name or "Uncategorized"),
+    }
+
+
+def _salla_category_ids(selector_config: dict, listing_urls: list[str]) -> list[str]:
+    configured = selector_config.get("category_ids") or selector_config.get("category_id") or []
+    if isinstance(configured, (str, int)):
+        configured = [str(configured)]
+    ids = [str(value).strip() for value in configured if str(value).strip()]
+    ids.extend(
+        category_id
+        for listing_url in listing_urls
+        for category_id in [_salla_category_id_from_url(listing_url)]
+        if category_id
+    )
+    return list(dict.fromkeys(ids))
+
+
+async def _discover_salla_category_ids(session, listing_urls: list[str], base_url: str) -> list[str]:
+    ids = []
+    for listing_url in listing_urls:
+        try:
+            async with session.get(listing_url, headers={"Accept": "text/html"}) as resp:
+                if resp.status >= 400:
+                    continue
+                body = await resp.text()
+        except Exception:
+            continue
+        ids.extend(_salla_category_ids_from_html(body))
+    return list(dict.fromkeys(ids))
+
+
+def _salla_category_id_from_url(url: str) -> Optional[str]:
+    parsed = urlparse(url or "")
+    match = re.search(r"/c(\d+)(?:/)?$", parsed.path)
+    if match:
+        return match.group(1)
+    query = parse_qs(parsed.query)
+    for key in ("source_value", "source_value[]", "category_id"):
+        values = query.get(key) or []
+        if values and str(values[0]).isdigit():
+            return str(values[0])
+    return None
+
+
+def _salla_category_ids_from_html(html_body: str) -> list[str]:
+    ids = [
+        match.group(1)
+        for match in re.finditer(
+            r"<salla-products-list\b[^>]*\bsource-value=[\"'](\d+)[\"']",
+            html_body or "",
+            re.IGNORECASE,
+        )
+    ]
+    ids.extend(match.group(1) for match in re.finditer(r"/c(\d+)", html_body or ""))
+    return list(dict.fromkeys(ids))
+
+
+def _salla_locale(selector_config: dict, listing_urls: list[str], base_url: str) -> str:
+    configured = selector_config.get("locale")
+    if configured:
+        return str(configured).strip("/")
+    for url in [*listing_urls, base_url]:
+        first_segment = (urlparse(url or "").path.strip("/").split("/") or [""])[0]
+        if re.fullmatch(r"[a-z]{2}", first_segment or ""):
+            return first_segment
+    return "en"
+
+
+def _salla_products_api_url(base_url: str, locale: str, source: str, category_id: str, per_page: int) -> str:
+    parsed = urlparse(base_url)
+    origin = f"{parsed.scheme or 'https'}://{parsed.netloc}"
+    query = urlencode({
+        "source": source,
+        "source_value[]": category_id,
+        "per_page": per_page,
+        "filterable": 1,
+    })
+    return f"{origin}/{locale.strip('/')}/api/v1/products?{query}"
+
+
+def _localize_salla_api_url(url: str, locale: str) -> str:
+    parsed = urlparse(url)
+    localized_path = f"/{locale.strip('/')}/api/v1/products"
+    if parsed.path == "/api/v1/products":
+        return urlunparse(parsed._replace(path=localized_path))
+    return url
 
 
 def _category_from_url(url: str) -> Optional[str]:

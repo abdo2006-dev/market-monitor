@@ -85,7 +85,7 @@ async def scan_now(competitor_id: int, db: AsyncSession = Depends(get_db)):
     if not competitor.active:
         raise HTTPException(status_code=400, detail="Competitor is inactive")
 
-    if settings.RUN_SCANS_INLINE or competitor.scrape_type == "shopify_json":
+    if settings.RUN_SCANS_INLINE or competitor.scrape_type in {"shopify_json", "salla_json"}:
         from app.workers.tasks import _scrape_competitor_async
         result = await _scrape_competitor_async(competitor_id)
         return {"message": "Scan completed", "result": result}
@@ -99,7 +99,11 @@ def _normalize_competitor_payload(payload: dict) -> dict:
     listing_urls = payload.get("listing_urls") or []
     scrape_type = payload.get("scrape_type")
 
-    if not scrape_type or (scrape_type in {"generic_selector", "custom"} and not listing_urls):
+    selector_config = payload.get("selector_config") or {}
+    if scrape_type != "salla_json" and _looks_like_salla_catalog(payload.get("base_url"), listing_urls, selector_config):
+        payload["scrape_type"] = "salla_json"
+        payload["selector_config"] = selector_config
+    elif not scrape_type or (scrape_type in {"generic_selector", "custom"} and not listing_urls):
         payload["scrape_type"] = "shopify_json"
         payload["listing_urls"] = []
         payload["selector_config"] = _shopify_selector_config(payload.get("selector_config"))
@@ -111,3 +115,10 @@ def _normalize_competitor_payload(payload: dict) -> dict:
 
 def _shopify_selector_config(selector_config: dict | None) -> dict:
     return {**SHOPIFY_SELECTOR_CONFIG, **(selector_config or {})}
+
+
+def _looks_like_salla_catalog(base_url: str | None, listing_urls: list[str], selector_config: dict) -> bool:
+    if selector_config.get("platform") == "salla" or selector_config.get("category_id") or selector_config.get("category_ids"):
+        return True
+    urls = [base_url or "", *listing_urls]
+    return any("/api/v1/products" in url or "/c" in url and any(ch.isdigit() for ch in url.rsplit("/c", 1)[-1]) for url in urls)

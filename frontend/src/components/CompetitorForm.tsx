@@ -6,6 +6,11 @@ const DEFAULT_SHOPIFY_SELECTOR = JSON.stringify({
   "include_all_products": true
 }, null, 2)
 
+const DEFAULT_SALLA_SELECTOR = JSON.stringify({
+  "platform": "salla",
+  "locale": "en"
+}, null, 2)
+
 const DEFAULT_GENERIC_SELECTOR = JSON.stringify({
   "product_card": ".product-card",
   "title": ".product-title",
@@ -63,6 +68,8 @@ export default function CompetitorForm({
       scrape_type: scrapeType,
       selector_config_text: scrapeType === 'shopify_json'
         ? DEFAULT_SHOPIFY_SELECTOR
+        : scrapeType === 'salla_json'
+          ? DEFAULT_SALLA_SELECTOR
         : (f.selector_config_text.trim() && f.selector_config_text.trim() !== DEFAULT_SHOPIFY_SELECTOR.trim()
           ? f.selector_config_text
           : DEFAULT_GENERIC_SELECTOR),
@@ -128,6 +135,7 @@ export default function CompetitorForm({
             <select value={form.scrape_type} onChange={setScrapeType}
               style={{ background: '#0f1117', border: '1px solid #2d3048', borderRadius: 8, padding: '8px 12px', color: '#e4e4f0', fontSize: 14, outline: 'none' }}>
               <option value="shopify_json">Auto Catalog</option>
+              <option value="salla_json">Salla Catalog</option>
               <option value="generic_selector">Generic Selector</option>
               <option value="custom">Custom</option>
             </select>
