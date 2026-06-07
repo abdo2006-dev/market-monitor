@@ -20,6 +20,34 @@ SALES_PERIODS = {
     "week": timedelta(days=7),
     "month": timedelta(days=30),
 }
+MUTATION_PHRASES = (
+    ("yin", "yang"),
+    ("blood", "moon"),
+    ("bloodrot",),
+    ("candy",),
+    ("celestial",),
+    ("corrupted",),
+    ("crystal",),
+    ("cursed",),
+    ("cyber",),
+    ("diamond",),
+    ("divine",),
+    ("electric",),
+    ("galaxy",),
+    ("gold",),
+    ("golden",),
+    ("hacker",),
+    ("lava",),
+    ("magma",),
+    ("radioactive",),
+    ("rainbow",),
+    ("shadow",),
+)
+MARKET_STAT_TOKENS = {
+    "s", "sec", "second", "seconds", "m", "b", "k", "t", "qn", "qns",
+    "best", "game", "in", "read", "description", "plus",
+}
+BRAINROT_CATEGORY_MARKERS = ("brainrot", "steal a brainrot", "escape tsunami")
 
 
 # ── Search ────────────────────────────────────────────────────────────────────
@@ -78,13 +106,21 @@ async def search_suggestions(
     rows = await _search_candidate_rows(db, q, 1000)
     grouped = {}
     for product, competitor_name in rows:
-        score = _match_score(normalize_title(q), product.normalized_title)
+        identity = _product_market_identity(product)
+        score = max(
+            _match_score(normalize_title(q), product.normalized_title),
+            _match_score(normalize_title(q), identity["base"]),
+        )
         if score < 0.34:
             continue
-        key = product.normalized_title
+        key = identity["key"]
         group = grouped.setdefault(key, {
-            "title": product.title,
-            "normalized_title": product.normalized_title,
+            "title": identity["display_title"],
+            "normalized_title": identity["key"],
+            "base_title": _title_from_normalized(identity["base"]),
+            "base_normalized_title": identity["base"],
+            "mutation": identity["mutation"],
+            "mutation_label": identity["mutation_label"],
             "category": product.category,
             "representative_product_id": product.id,
             "best_price": product.current_price,
@@ -137,8 +173,8 @@ async def compare_product(
     if not target_product:
         return {"target": None, "items": [], "total_matches": 0}
 
-    target_norm = target_product.normalized_title
-    aliases = _comparison_aliases(target_norm)
+    target_identity = _product_market_identity(target_product)
+    aliases = _comparison_aliases(target_identity["base"])
     competitors = (await db.execute(select(Competitor).where(Competitor.active == True))).scalars().all()
     rows = (await db.execute(
         select(Product, Competitor.name.label("cname"))
@@ -148,7 +184,10 @@ async def compare_product(
 
     best_by_competitor = {}
     for product, competitor_name in rows:
-        candidate_aliases = _comparison_aliases(product.normalized_title)
+        candidate_identity = _product_market_identity(product)
+        if candidate_identity["mutation"] != target_identity["mutation"]:
+            continue
+        candidate_aliases = _comparison_aliases(candidate_identity["base"])
         score = max(
             _comparison_score(target_alias, candidate_alias)
             for target_alias in aliases
@@ -189,6 +228,7 @@ async def compare_product(
     target = ProductOut.model_validate(target_product).model_dump()
     return {
         "target": target,
+        "identity": target_identity,
         "aliases": sorted(aliases),
         "items": items,
         "total_matches": sum(1 for item in items if item["product"]),
@@ -258,6 +298,71 @@ def _comparison_score(query: str, candidate: str) -> float:
     if set(q_tokens).issubset(set(c_tokens)):
         return 0.9
     return SequenceMatcher(None, query, candidate).ratio()
+
+
+def _product_market_identity(product: Product) -> dict:
+    return _market_identity(
+        product.normalized_title,
+        product.category,
+    )
+
+
+def _market_identity(normalized_title: str, category: Optional[str] = None) -> dict:
+    cleaned = _clean_market_tokens(normalized_title)
+    mutation_enabled = _mutation_identity_enabled(normalized_title, category)
+    mutation_tokens = []
+    base_tokens = cleaned[:]
+    if mutation_enabled:
+        mutation_tokens, base_tokens = _extract_mutation_tokens(cleaned)
+    base = " ".join(base_tokens).strip() or cleaned and " ".join(cleaned).strip() or normalized_title
+    mutation = " ".join(mutation_tokens).strip() or "normal"
+    mutation_label = "Normal" if mutation == "normal" else _title_from_normalized(mutation)
+    display_title = _title_from_normalized(base) if mutation == "normal" else f"{mutation_label} {_title_from_normalized(base)}"
+    return {
+        "key": f"{base}::{mutation}",
+        "base": base,
+        "mutation": mutation,
+        "mutation_label": mutation_label,
+        "display_title": display_title,
+    }
+
+
+def _mutation_identity_enabled(normalized_title: str, category: Optional[str]) -> bool:
+    text = f"{category or ''} {normalized_title}".lower()
+    if any(marker in text for marker in BRAINROT_CATEGORY_MARKERS):
+        return True
+    tokens = normalized_title.split()
+    return any(any(ch.isdigit() for ch in token) and any(unit in token for unit in ("m", "b", "qn")) for token in tokens)
+
+
+def _clean_market_tokens(normalized_title: str) -> list[str]:
+    tokens = []
+    for token in normalized_title.split():
+        if any(ch.isdigit() for ch in token):
+            continue
+        if token in MARKET_STAT_TOKENS:
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def _extract_mutation_tokens(tokens: list[str]) -> tuple[list[str], list[str]]:
+    mutation_indexes = set()
+    mutation_tokens = []
+    for phrase in MUTATION_PHRASES:
+        length = len(phrase)
+        for idx in range(0, len(tokens) - length + 1):
+            if tuple(tokens[idx:idx + length]) == phrase:
+                mutation_indexes.update(range(idx, idx + length))
+                mutation_tokens.extend(phrase)
+                break
+    base_tokens = [token for idx, token in enumerate(tokens) if idx not in mutation_indexes]
+    deduped_mutation = list(dict.fromkeys(mutation_tokens))
+    return deduped_mutation, base_tokens
+
+
+def _title_from_normalized(value: str) -> str:
+    return " ".join(part.capitalize() for part in value.split())
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────

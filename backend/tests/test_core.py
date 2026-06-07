@@ -396,3 +396,35 @@ class TestFuzzySearch:
             for candidate in candidate_aliases
         )
         assert score > 0.9
+
+    def test_brainrot_market_identity_separates_mutations(self):
+        from app.api.search_dashboard_settings import _market_identity
+
+        normal = _market_identity("esok sekolah", "Steal a Brainrot")
+        divine = _market_identity("300m s divine esok sekolah", "steal a brainrot")
+        galaxy = _market_identity("galaxy esok sekolah 210m 1s", "Best-selling weapons and pets!")
+
+        assert normal["base"] == "esok sekolah"
+        assert normal["mutation"] == "normal"
+        assert divine["base"] == "esok sekolah"
+        assert divine["mutation"] == "divine"
+        assert galaxy["base"] == "esok sekolah"
+        assert galaxy["mutation"] == "galaxy"
+        assert divine["key"] != normal["key"]
+
+    def test_brainrot_market_identity_groups_same_mutation_across_noisy_titles(self):
+        from app.api.search_dashboard_settings import _market_identity
+
+        clean = _market_identity("divine esok sekolah", "Steal a Brainrot")
+        noisy = _market_identity("300m s divine esok sekolah", "Bloxy Store")
+
+        assert clean["key"] == noisy["key"]
+        assert noisy["display_title"] == "Divine Esok Sekolah"
+
+    def test_market_identity_does_not_strip_non_brainrot_rainbow_items(self):
+        from app.api.search_dashboard_settings import _market_identity
+
+        identity = _market_identity("rainbow knife", "Murder Mystery 2")
+
+        assert identity["base"] == "rainbow knife"
+        assert identity["mutation"] == "normal"
