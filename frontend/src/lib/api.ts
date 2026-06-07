@@ -30,6 +30,22 @@ export const compareProduct = (params: any) => api.get('/search/compare', { para
 export const getDashboardSummary = () => api.get('/dashboard/summary').then(r => r.data)
 export const getSalesTrends = (params: any) => api.get('/dashboard/sales-trends', { params }).then(r => r.data)
 
+// Exports
+export const collectionPricesExportUrl = (params: {
+  competitor_id: string | number
+  collection_url: string
+  format: string
+  max_pages: string | number
+}) => {
+  const query = new URLSearchParams({
+    competitor_id: String(params.competitor_id),
+    collection_url: params.collection_url,
+    format: params.format,
+    max_pages: String(params.max_pages),
+  })
+  return `${api.defaults.baseURL}/exports/collection-prices?${query.toString()}`
+}
+
 // Settings
 export const getSettings = () => api.get('/settings').then(r => r.data)
 export const updateSettings = (data: any) => api.put('/settings', data).then(r => r.data)

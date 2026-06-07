@@ -436,3 +436,34 @@ class TestFuzzySearch:
 
         assert identity["base"] == "rainbow knife"
         assert identity["mutation"] == "normal"
+
+
+class TestCollectionExports:
+    def test_export_rows_include_llm_friendly_fields(self):
+        from types import SimpleNamespace
+        from app.api.exports import _export_rows
+
+        competitor = SimpleNamespace(name="BloxCrew", base_url="https://bloxcrews.com/")
+        rows = _export_rows(competitor, "https://bloxcrews.com/collections/steal-a-brainrot", [{
+            "title": "Divine Esok Sekolah",
+            "category": "Steal a Brainrot",
+            "price": 9.99,
+            "currency": "USD",
+            "stock_status": "in_stock",
+            "url": "https://bloxcrews.com/product/divine-esok-sekolah",
+            "image_url": "https://cdn.example/esok.png",
+            "external_id": "1:2",
+        }])
+
+        assert rows[0]["competitor_name"] == "BloxCrew"
+        assert rows[0]["collection_url"].endswith("/collections/steal-a-brainrot")
+        assert rows[0]["title"] == "Divine Esok Sekolah"
+        assert rows[0]["price"] == 9.99
+        assert rows[0]["product_url"].endswith("/product/divine-esok-sekolah")
+
+    def test_export_filename_uses_collection_handle(self):
+        from app.api.exports import _export_filename
+
+        filename = _export_filename("Bloxy Store", "https://bloxystores.com/collections/steal-a-brainrot", "jsonl")
+
+        assert filename == "bloxy-store-steal-a-brainrot-prices.jsonl"

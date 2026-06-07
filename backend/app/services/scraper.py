@@ -125,13 +125,21 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
     all_products = []
     seen_urls = set()
 
+    timeout_seconds = selector_config.get("request_timeout_seconds", 30)
     connector = _aiohttp_connector(aiohttp)
     async with aiohttp.ClientSession(
         headers=headers,
-        timeout=aiohttp.ClientTimeout(total=30),
+        timeout=aiohttp.ClientTimeout(total=timeout_seconds),
         connector=connector,
     ) as session:
-        collections = await _shopify_collections(session, base_url)
+        if selector_config.get("prefer_storefront_graphql"):
+            all_products = await _scrape_shopify_storefront_graphql(session, base_url, selector_config)
+            if all_products:
+                return all_products
+
+        collections = []
+        if selector_config.get("discover_collections", True):
+            collections = await _shopify_collections(session, base_url)
         targets = _shopify_targets(base_url, listing_urls, collections, selector_config)
         if not targets:
             targets = [{"url": f"{base_url}/products.json", "category": None}]
@@ -377,7 +385,14 @@ async def _discover_storefront_assets_text(session, base_url: str) -> str:
 
     asset_urls = _javascript_asset_urls(body, base_url)
     texts = []
-    for asset_url in asset_urls[:12]:
+    seen_urls = set()
+    idx = 0
+    while idx < len(asset_urls) and len(seen_urls) < 40:
+        asset_url = asset_urls[idx]
+        idx += 1
+        if asset_url in seen_urls:
+            continue
+        seen_urls.add(asset_url)
         try:
             async with session.get(asset_url, headers={"Accept": "application/javascript, text/javascript, */*"}) as resp:
                 if resp.status >= 400:
@@ -388,6 +403,7 @@ async def _discover_storefront_assets_text(session, base_url: str) -> str:
         texts.append(text)
         if "X-Shopify-Storefront-Access-Token" in text and "graphql.json" in text:
             break
+        asset_urls.extend(_javascript_import_urls(text, asset_url))
     return "\n".join(texts)
 
 
@@ -395,6 +411,13 @@ def _javascript_asset_urls(html_body: str, base_url: str) -> list[str]:
     urls = []
     for match in re.finditer(r'(?:src|href)=["\']([^"\']+\.js(?:\?[^"\']*)?)["\']', html_body or "", re.IGNORECASE):
         urls.append(normalize_url(html.unescape(match.group(1)), base_url))
+    return list(dict.fromkeys(urls))
+
+
+def _javascript_import_urls(js_body: str, asset_url: str) -> list[str]:
+    urls = []
+    for match in re.finditer(r'(?:import\(|from\s*)["\']([^"\']+\.js(?:\?[^"\']*)?)["\']', js_body or ""):
+        urls.append(normalize_url(html.unescape(match.group(1)), asset_url))
     return list(dict.fromkeys(urls))
 
 
