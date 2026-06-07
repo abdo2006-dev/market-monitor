@@ -366,7 +366,7 @@ class TestSallaScraper:
         from app.services.scraper import _localize_salla_api_url
 
         assert _localize_salla_api_url("https://example.com/api/v1/products?page=2", "en") == (
-            "https://example.com/en/api/v1/products?page=2"
+            "https://example.com/en/api/v1/products?page=2&currency=SAR"
         )
 
 

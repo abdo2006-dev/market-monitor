@@ -5,7 +5,7 @@ import logging
 import re
 import ssl
 from typing import Optional
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from app.utils.price_parser import parse_price
 from app.utils.text_normalizer import normalize_url
@@ -196,7 +196,9 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
     timeout_seconds = selector_config.get("request_timeout_seconds", 30)
     per_page = min(int(selector_config.get("per_page") or 32), 32)
     source = selector_config.get("source") or "categories"
+    currency = selector_config.get("currency") or "SAR"
     category_ids = _salla_category_ids(selector_config, listing_urls)
+    headers["Cookie"] = f"s-curr={currency}"
     all_products = []
     seen = set()
 
@@ -214,7 +216,7 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
 
         for category_id in category_ids:
             locale = _salla_locale(selector_config, listing_urls, base_url)
-            next_url = _salla_products_api_url(base_url, locale, source, category_id, per_page)
+            next_url = _salla_products_api_url(base_url, locale, source, category_id, per_page, currency)
             category_name = None
 
             for _ in range(max_pages):
@@ -244,7 +246,7 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
                 next_url = cursor.get("next")
                 if not next_url:
                     break
-                next_url = _localize_salla_api_url(next_url, locale)
+                next_url = _localize_salla_api_url(next_url, locale, currency)
 
     return all_products
 
@@ -919,7 +921,8 @@ def _salla_locale(selector_config: dict, listing_urls: list[str], base_url: str)
     return "en"
 
 
-def _salla_products_api_url(base_url: str, locale: str, source: str, category_id: str, per_page: int) -> str:
+def _salla_products_api_url(base_url: str, locale: str, source: str, category_id: str, per_page: int,
+                            currency: Optional[str] = "SAR") -> str:
     parsed = urlparse(base_url)
     origin = f"{parsed.scheme or 'https'}://{parsed.netloc}"
     query = urlencode({
@@ -927,16 +930,22 @@ def _salla_products_api_url(base_url: str, locale: str, source: str, category_id
         "source_value[]": category_id,
         "per_page": per_page,
         "filterable": 1,
+        "currency": currency,
     })
     return f"{origin}/{locale.strip('/')}/api/v1/products?{query}"
 
 
-def _localize_salla_api_url(url: str, locale: str) -> str:
+def _localize_salla_api_url(url: str, locale: str, currency: Optional[str] = "SAR") -> str:
     parsed = urlparse(url)
     localized_path = f"/{locale.strip('/')}/api/v1/products"
     if parsed.path == "/api/v1/products":
-        return urlunparse(parsed._replace(path=localized_path))
-    return url
+        parsed = parsed._replace(path=localized_path)
+    if currency:
+        params = parse_qsl(parsed.query, keep_blank_values=True)
+        if not any(key == "currency" for key, _ in params):
+            params.append(("currency", currency))
+        parsed = parsed._replace(query=urlencode(params))
+    return urlunparse(parsed)
 
 
 def _category_from_url(url: str) -> Optional[str]:

@@ -8,7 +8,8 @@ const DEFAULT_SHOPIFY_SELECTOR = JSON.stringify({
 
 const DEFAULT_SALLA_SELECTOR = JSON.stringify({
   "platform": "salla",
-  "locale": "en"
+  "locale": "en",
+  "currency": "SAR"
 }, null, 2)
 
 const DEFAULT_GENERIC_SELECTOR = JSON.stringify({
