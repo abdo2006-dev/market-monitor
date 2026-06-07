@@ -103,10 +103,11 @@ async def search_suggestions(
     limit: int = 20,
     db: AsyncSession = Depends(get_db),
 ):
+    query_base_hint = _query_market_base_hint(q)
     rows = await _search_candidate_rows(db, q, 1000)
     grouped = {}
     for product, competitor_name in rows:
-        identity = _product_market_identity(product)
+        identity = _product_market_identity(product, base_hint=query_base_hint)
         score = max(
             _match_score(normalize_title(q), product.normalized_title),
             _match_score(normalize_title(q), identity["base"]),
@@ -184,7 +185,7 @@ async def compare_product(
 
     best_by_competitor = {}
     for product, competitor_name in rows:
-        candidate_identity = _product_market_identity(product)
+        candidate_identity = _product_market_identity(product, base_hint=target_identity["base"])
         if candidate_identity["mutation"] != target_identity["mutation"]:
             continue
         candidate_aliases = _comparison_aliases(candidate_identity["base"])
@@ -300,16 +301,17 @@ def _comparison_score(query: str, candidate: str) -> float:
     return SequenceMatcher(None, query, candidate).ratio()
 
 
-def _product_market_identity(product: Product) -> dict:
+def _product_market_identity(product: Product, base_hint: Optional[str] = None) -> dict:
     return _market_identity(
         product.normalized_title,
         product.category,
+        base_hint=base_hint,
     )
 
 
-def _market_identity(normalized_title: str, category: Optional[str] = None) -> dict:
+def _market_identity(normalized_title: str, category: Optional[str] = None, base_hint: Optional[str] = None) -> dict:
     cleaned = _clean_market_tokens(normalized_title)
-    mutation_enabled = _mutation_identity_enabled(normalized_title, category)
+    mutation_enabled = _mutation_identity_enabled(normalized_title, category, cleaned, base_hint)
     mutation_tokens = []
     base_tokens = cleaned[:]
     if mutation_enabled:
@@ -327,12 +329,29 @@ def _market_identity(normalized_title: str, category: Optional[str] = None) -> d
     }
 
 
-def _mutation_identity_enabled(normalized_title: str, category: Optional[str]) -> bool:
+def _query_market_base_hint(query: str) -> str:
+    cleaned = _clean_market_tokens(normalize_title(query))
+    _, base_tokens = _extract_mutation_tokens(cleaned)
+    return " ".join(base_tokens).strip() or " ".join(cleaned).strip()
+
+
+def _mutation_identity_enabled(
+    normalized_title: str,
+    category: Optional[str],
+    cleaned_tokens: list[str],
+    base_hint: Optional[str] = None,
+) -> bool:
     text = f"{category or ''} {normalized_title}".lower()
     if any(marker in text for marker in BRAINROT_CATEGORY_MARKERS):
         return True
     tokens = normalized_title.split()
-    return any(any(ch.isdigit() for ch in token) and any(unit in token for unit in ("m", "b", "qn")) for token in tokens)
+    if any(any(ch.isdigit() for ch in token) and any(unit in token for unit in ("m", "b", "qn")) for token in tokens):
+        return True
+    if base_hint:
+        mutation_tokens, base_tokens = _extract_mutation_tokens(cleaned_tokens)
+        if mutation_tokens and " ".join(base_tokens).strip() == base_hint:
+            return True
+    return False
 
 
 def _clean_market_tokens(normalized_title: str) -> list[str]:

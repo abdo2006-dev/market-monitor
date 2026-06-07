@@ -421,6 +421,14 @@ class TestFuzzySearch:
         assert clean["key"] == noisy["key"]
         assert noisy["display_title"] == "Divine Esok Sekolah"
 
+    def test_market_identity_uses_search_base_hint_for_generic_categories(self):
+        from app.api.search_dashboard_settings import _market_identity
+
+        identity = _market_identity("divine esok sekolah", "Best-selling weapons and pets!", base_hint="esok sekolah")
+
+        assert identity["base"] == "esok sekolah"
+        assert identity["mutation"] == "divine"
+
     def test_market_identity_does_not_strip_non_brainrot_rainbow_items(self):
         from app.api.search_dashboard_settings import _market_identity
 
