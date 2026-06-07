@@ -337,9 +337,9 @@ class TestSallaScraper:
 
         raw = {
             "id": "1337747900",
-            "name": "Steal a Brainrot Caylusaurus",
+            "name": "ماب السرقة كايلوساروس - Steal a Brainrot Caylusaurus",
             "url": "https://tubbyshtubby.com/en/product/p1337747900",
-            "price": 482.13,
+            "price": 9.31,
             "currency": "SAR",
             "is_available": True,
             "is_out_of_stock": False,
@@ -348,13 +348,13 @@ class TestSallaScraper:
             "image": {"url": "https://cdn.example/caylus.png"},
         }
 
-        product = _extract_salla_product(raw, "https://tubbyshtubby.com")
+        product = _extract_salla_product(raw, "https://tubbyshtubby.com", requested_currency="USD")
         assert product["title"] == "Steal a Brainrot Caylusaurus"
-        assert product["price"] == 482.13
-        assert product["currency"] == "SAR"
+        assert product["price"] == 9.31
+        assert product["currency"] == "USD"
         assert product["stock_status"] == "in_stock"
         assert product["external_id"] == "1337747900"
-        assert product["category"] == "ماب السرقة"
+        assert product["category"] == "Steal a Brainrot"
 
     def test_salla_category_id_from_url(self):
         from app.services.scraper import _salla_category_id_from_url
@@ -366,7 +366,7 @@ class TestSallaScraper:
         from app.services.scraper import _localize_salla_api_url
 
         assert _localize_salla_api_url("https://example.com/api/v1/products?page=2", "en") == (
-            "https://example.com/en/api/v1/products?page=2&currency=SAR"
+            "https://example.com/en/api/v1/products?page=2&currency=USD"
         )
 
 

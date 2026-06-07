@@ -196,7 +196,7 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
     timeout_seconds = selector_config.get("request_timeout_seconds", 30)
     per_page = min(int(selector_config.get("per_page") or 32), 32)
     source = selector_config.get("source") or "categories"
-    currency = selector_config.get("currency") or "SAR"
+    currency = selector_config.get("currency") or "USD"
     category_ids = _salla_category_ids(selector_config, listing_urls)
     headers["Cookie"] = f"s-curr={currency}"
     all_products = []
@@ -217,7 +217,7 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
         for category_id in category_ids:
             locale = _salla_locale(selector_config, listing_urls, base_url)
             next_url = _salla_products_api_url(base_url, locale, source, category_id, per_page, currency)
-            category_name = None
+            category_name = selector_config.get("category_name")
 
             for _ in range(max_pages):
                 try:
@@ -235,7 +235,7 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
                     break
 
                 for raw in raw_products:
-                    product = _extract_salla_product(raw, base_url, category_name)
+                    product = _extract_salla_product(raw, base_url, category_name, currency)
                     category_name = category_name or product.get("category") if product else category_name
                     key = product.get("external_id") or product.get("url") if product else None
                     if product and key not in seen:
@@ -821,14 +821,16 @@ def _extract_shopify_product(raw: dict, base_url: str, category: Optional[str]) 
     }
 
 
-def _extract_salla_product(raw: dict, base_url: str, category: Optional[str] = None) -> Optional[dict]:
-    title = (raw.get("name") or raw.get("title") or "").strip()
+def _extract_salla_product(raw: dict, base_url: str, category: Optional[str] = None,
+                           requested_currency: Optional[str] = None) -> Optional[dict]:
+    title = _english_text(raw.get("name") or raw.get("title") or "")
     product_url = raw.get("url") or raw.get("custom_url")
     if not title or not product_url:
         return None
 
     raw_price = raw.get("price")
-    price, currency = parse_price(str(raw_price) if raw_price is not None else None, raw.get("currency") or "SAR")
+    raw_currency = requested_currency or raw.get("currency") or "USD"
+    price, currency = parse_price(str(raw_price) if raw_price is not None else None, raw_currency)
     image = raw.get("image") or {}
     image_url = image.get("url") if isinstance(image, dict) else image
     if not image_url:
@@ -842,9 +844,10 @@ def _extract_salla_product(raw: dict, base_url: str, category: Optional[str] = N
 
     raw_category = raw.get("category") or {}
     category_name = raw_category.get("name") if isinstance(raw_category, dict) else raw_category
+    category_name = _english_category(category or category_name)
 
     return {
-        "title": html.unescape(title),
+        "title": title,
         "price": price,
         "currency": currency,
         "url": normalize_url(product_url, base_url),
@@ -852,8 +855,33 @@ def _extract_salla_product(raw: dict, base_url: str, category: Optional[str] = N
         "stock_status": stock_status,
         "sku": raw.get("sku"),
         "external_id": str(raw.get("id")) if raw.get("id") is not None else None,
-        "category": html.unescape(category or category_name or "Uncategorized"),
+        "category": category_name or "Uncategorized",
     }
+
+
+def _english_text(value: Optional[str]) -> str:
+    text = html.unescape(str(value or "")).strip()
+    if " - " in text:
+        for part in reversed(text.split(" - ")):
+            candidate = part.strip()
+            if re.search(r"[A-Za-z]", candidate):
+                return candidate
+    return text
+
+
+def _english_category(value: Optional[str]) -> Optional[str]:
+    text = _english_text(value)
+    known = {
+        "ماب السرقة": "Steal a Brainrot",
+        "روبلوكس": "Roblox",
+        "سايلور بيس": "Sailor Piece",
+        "ماب النباتات ضد البراينروت": "Plants vs Brainrot",
+        "ماب المزرعة": "Grow a Garden",
+        "ماب ادوبت مي": "Adopt Me",
+        "روبوكس": "Robux",
+        "الهروب من تسونامي": "Escape Tsunami",
+    }
+    return known.get(text, text or None)
 
 
 def _salla_category_ids(selector_config: dict, listing_urls: list[str]) -> list[str]:
@@ -922,7 +950,7 @@ def _salla_locale(selector_config: dict, listing_urls: list[str], base_url: str)
 
 
 def _salla_products_api_url(base_url: str, locale: str, source: str, category_id: str, per_page: int,
-                            currency: Optional[str] = "SAR") -> str:
+                            currency: Optional[str] = "USD") -> str:
     parsed = urlparse(base_url)
     origin = f"{parsed.scheme or 'https'}://{parsed.netloc}"
     query = urlencode({
@@ -935,7 +963,7 @@ def _salla_products_api_url(base_url: str, locale: str, source: str, category_id
     return f"{origin}/{locale.strip('/')}/api/v1/products?{query}"
 
 
-def _localize_salla_api_url(url: str, locale: str, currency: Optional[str] = "SAR") -> str:
+def _localize_salla_api_url(url: str, locale: str, currency: Optional[str] = "USD") -> str:
     parsed = urlparse(url)
     localized_path = f"/{locale.strip('/')}/api/v1/products"
     if parsed.path == "/api/v1/products":
