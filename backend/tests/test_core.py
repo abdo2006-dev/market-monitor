@@ -489,6 +489,37 @@ class TestFuzzySearch:
         assert identity["base"] == "rainbow knife"
         assert identity["mutation"] == "normal"
 
+    def test_market_identity_groups_same_collection_aliases(self):
+        from app.api.search_dashboard_settings import _market_identity
+
+        adopt_me = _market_identity("unicorn", "Adopt Me")
+        adm = _market_identity("unicorn", "ADM Pets")
+
+        assert adopt_me["key"] == adm["key"]
+        assert adopt_me["collection"] == "adopt me"
+        assert adopt_me["collection_label"] == "Adopt Me"
+
+    def test_market_identity_separates_same_name_across_collections(self):
+        from app.api.search_dashboard_settings import _market_identity
+
+        adopt_me = _market_identity("unicorn", "ADM")
+        garden = _market_identity("unicorn", "GAG2")
+
+        assert adopt_me["item_key"] == garden["item_key"]
+        assert adopt_me["collection"] == "adopt me"
+        assert garden["collection"] == "grow a garden 2"
+        assert adopt_me["key"] != garden["key"]
+
+    def test_collection_compatibility_rejects_different_known_collections(self):
+        from app.api.search_dashboard_settings import _collections_compatible, _market_identity
+
+        adopt_me = _market_identity("unicorn", "Adopt Me")
+        garden = _market_identity("unicorn", "Grow a Garden 2")
+        unknown = _market_identity("unicorn", None)
+
+        assert _collections_compatible(adopt_me, garden) is False
+        assert _collections_compatible(adopt_me, unknown) is True
+
 
 class TestCollectionExports:
     def test_export_rows_include_llm_friendly_fields(self):

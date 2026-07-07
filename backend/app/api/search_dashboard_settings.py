@@ -48,6 +48,36 @@ MARKET_STAT_TOKENS = {
     "best", "game", "in", "read", "description", "plus",
 }
 BRAINROT_CATEGORY_MARKERS = ("brainrot", "steal a brainrot", "escape tsunami")
+GENERIC_COLLECTION_TOKENS = {
+    "", "uncategorized", "roblox", "roblox marketplace", "marketplace",
+    "best selling weapons and pets", "best-selling weapons and pets", "bloxy store",
+}
+COLLECTION_ALIASES = {
+    "adopt me": ("adopt me", "adoptme", "adm"),
+    "grow a garden": ("grow a garden", "grow garden", "garden", "gag"),
+    "grow a garden 2": ("grow a garden 2", "grow garden 2", "gag2", "gag 2"),
+    "steal a brainrot": ("steal a brainrot", "brainrot", "sab"),
+    "murder mystery 2": ("murder mystery 2", "mm2"),
+    "blox fruits": ("blox fruits", "blox fruit", "bf"),
+    "pet simulator 99": ("pet simulator 99", "ps99", "pet sim 99"),
+    "sailor piece": ("sailor piece", "sailor-piece"),
+    "escape tsunami": ("escape tsunami", "escape tsunami for brainrots"),
+    "rivals": ("rivals",),
+    "robux": ("robux",),
+}
+COLLECTION_LABELS = {
+    "adopt me": "Adopt Me",
+    "grow a garden": "Grow a Garden",
+    "grow a garden 2": "Grow a Garden 2",
+    "steal a brainrot": "Steal a Brainrot",
+    "murder mystery 2": "Murder Mystery 2",
+    "blox fruits": "Blox Fruits",
+    "pet simulator 99": "Pet Simulator 99",
+    "sailor piece": "Sailor Piece",
+    "escape tsunami": "Escape Tsunami",
+    "rivals": "Rivals",
+    "robux": "Robux",
+}
 
 
 # ── Search ────────────────────────────────────────────────────────────────────
@@ -71,7 +101,14 @@ async def search_products(
     # Keep the database query broad, then do fuzzy ranking in Python so spelling can be imperfect.
     if tokens:
         fuzzy_tokens = {t for token in tokens for t in _fuzzy_token_variants(token)}
-        token_filters = [Product.normalized_title.ilike(f"%{t}%") for t in fuzzy_tokens if len(t) >= 2]
+        token_filters = [
+            condition
+            for t in fuzzy_tokens if len(t) >= 2
+            for condition in (
+                Product.normalized_title.ilike(f"%{t}%"),
+                Product.category.ilike(f"%{t}%"),
+            )
+        ]
         if token_filters:
             query = query.where(or_(*token_filters))
 
@@ -122,7 +159,7 @@ async def search_suggestions(
             "base_normalized_title": identity["base"],
             "mutation": identity["mutation"],
             "mutation_label": identity["mutation_label"],
-            "category": product.category,
+            "category": identity["collection_label"] if identity["collection"] != "unknown" else product.category,
             "representative_product_id": product.id,
             "best_price": product.current_price,
             "currency": product.currency,
@@ -186,6 +223,8 @@ async def compare_product(
     best_by_competitor = {}
     for product, competitor_name in rows:
         candidate_identity = _product_market_identity(product, base_hint=target_identity["base"])
+        if not _collections_compatible(target_identity, candidate_identity):
+            continue
         if candidate_identity["mutation"] != target_identity["mutation"]:
             continue
         candidate_aliases = _comparison_aliases(candidate_identity["base"])
@@ -246,7 +285,14 @@ async def _search_candidate_rows(db: AsyncSession, q: str, limit: int):
     )
     if tokens:
         fuzzy_tokens = {t for token in tokens for t in _fuzzy_token_variants(token)}
-        token_filters = [Product.normalized_title.ilike(f"%{t}%") for t in fuzzy_tokens if len(t) >= 2]
+        token_filters = [
+            condition
+            for t in fuzzy_tokens if len(t) >= 2
+            for condition in (
+                Product.normalized_title.ilike(f"%{t}%"),
+                Product.category.ilike(f"%{t}%"),
+            )
+        ]
         if token_filters:
             query = query.where(or_(*token_filters))
     query = query.order_by(Product.last_checked_at.desc()).limit(limit)
@@ -311,6 +357,7 @@ def _product_market_identity(product: Product, base_hint: Optional[str] = None) 
 
 def _market_identity(normalized_title: str, category: Optional[str] = None, base_hint: Optional[str] = None) -> dict:
     cleaned = _clean_market_tokens(normalized_title)
+    collection = _collection_identity(normalized_title, category)
     mutation_enabled = _mutation_identity_enabled(normalized_title, category, cleaned, base_hint)
     mutation_tokens = []
     base_tokens = cleaned[:]
@@ -321,7 +368,10 @@ def _market_identity(normalized_title: str, category: Optional[str] = None, base
     mutation_label = "Normal" if mutation == "normal" else _title_from_normalized(mutation)
     display_title = _title_from_normalized(base) if mutation == "normal" else f"{mutation_label} {_title_from_normalized(base)}"
     return {
-        "key": f"{base}::{mutation}",
+        "key": f"{collection['key']}::{base}::{mutation}",
+        "item_key": f"{base}::{mutation}",
+        "collection": collection["key"],
+        "collection_label": collection["label"],
         "base": base,
         "mutation": mutation,
         "mutation_label": mutation_label,
@@ -345,7 +395,7 @@ def _mutation_identity_enabled(
     if any(marker in text for marker in BRAINROT_CATEGORY_MARKERS):
         return True
     tokens = normalized_title.split()
-    if any(any(ch.isdigit() for ch in token) and any(unit in token for unit in ("m", "b", "qn")) for token in tokens):
+    if _has_brainrot_stat_token(tokens):
         return True
     if base_hint:
         mutation_tokens, base_tokens = _extract_mutation_tokens(cleaned_tokens)
@@ -382,6 +432,49 @@ def _extract_mutation_tokens(tokens: list[str]) -> tuple[list[str], list[str]]:
 
 def _title_from_normalized(value: str) -> str:
     return " ".join(part.capitalize() for part in value.split())
+
+
+def _collection_identity(normalized_title: str, category: Optional[str]) -> dict:
+    category_norm = normalize_title(category or "")
+    combined = f"{category_norm} {normalized_title}".strip()
+    if any(marker in combined for marker in BRAINROT_CATEGORY_MARKERS) or _has_brainrot_stat_token(normalized_title.split()):
+        return {"key": "steal a brainrot", "label": _collection_label("steal a brainrot")}
+    for canonical, aliases in COLLECTION_ALIASES.items():
+        for alias in aliases:
+            alias_norm = normalize_title(alias)
+            if _collection_alias_matches(alias_norm, category_norm, combined):
+                return {"key": canonical, "label": _collection_label(canonical)}
+    if category_norm and category_norm not in GENERIC_COLLECTION_TOKENS:
+        return {"key": category_norm, "label": _title_from_normalized(category_norm)}
+    return {"key": "unknown", "label": "Unknown"}
+
+
+def _collection_label(canonical: str) -> str:
+    return COLLECTION_LABELS.get(canonical, _title_from_normalized(canonical))
+
+
+def _collection_alias_matches(alias: str, category_norm: str, combined: str) -> bool:
+    if not alias:
+        return False
+    if alias == category_norm:
+        return True
+    if f" {alias} " in f" {combined} ":
+        return True
+    compact_alias = alias.replace(" ", "")
+    compact_category = category_norm.replace(" ", "")
+    return bool(compact_alias and compact_alias == compact_category)
+
+
+def _collections_compatible(target_identity: dict, candidate_identity: dict) -> bool:
+    target_collection = target_identity.get("collection") or "unknown"
+    candidate_collection = candidate_identity.get("collection") or "unknown"
+    if "unknown" in {target_collection, candidate_collection}:
+        return True
+    return target_collection == candidate_collection
+
+
+def _has_brainrot_stat_token(tokens: list[str]) -> bool:
+    return any(any(ch.isdigit() for ch in token) and any(unit in token for unit in ("m", "b", "qn")) for token in tokens)
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────
