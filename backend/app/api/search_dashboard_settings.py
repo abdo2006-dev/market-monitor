@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, or_
@@ -16,8 +16,11 @@ settings_router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 class BatchCompareRequest(BaseModel):
-    queries: list[str] = Field(..., min_length=1, max_length=50)
+    queries: list[str] = Field(..., min_length=1, max_length=100)
     include_unmatched: bool = True
+
+
+MAX_BATCH_COMPARE_QUERIES = 100
 
 INFERRED_SALE_EVENT_TYPES = ("stock_out",)
 REMOVED_PRODUCT_EVENT_TYPES = ("product_removed",)
@@ -210,21 +213,58 @@ async def batch_compare_products(
     payload: BatchCompareRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    return await _batch_compare_response(
+        db,
+        payload.queries,
+        include_unmatched=payload.include_unmatched,
+    )
+
+
+@search_router.get("/batch-compare")
+async def batch_compare_products_get(
+    queries: list[str] = Query(..., min_length=1),
+    include_unmatched: bool = True,
+    db: AsyncSession = Depends(get_db),
+):
+    return await _batch_compare_response(
+        db,
+        _expand_batch_queries(queries),
+        include_unmatched=include_unmatched,
+    )
+
+
+async def _batch_compare_response(
+    db: AsyncSession,
+    raw_queries: list[str],
+    include_unmatched: bool = True,
+):
     results = []
     seen = set()
-    for raw_query in payload.queries:
+    for raw_query in raw_queries:
         query = raw_query.strip()
         if not query or query in seen:
             continue
         seen.add(query)
+        if len(seen) > MAX_BATCH_COMPARE_QUERIES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Batch compare supports up to {MAX_BATCH_COMPARE_QUERIES} queries per request.",
+            )
         result = await _compare_product_response(
             db,
             q=query,
-            include_unmatched=payload.include_unmatched,
+            include_unmatched=include_unmatched,
         )
         result["query"] = query
         results.append(result)
     return {"items": results, "total": len(results)}
+
+
+def _expand_batch_queries(raw_queries: list[str]) -> list[str]:
+    expanded = []
+    for raw_query in raw_queries:
+        expanded.extend(part.strip() for part in raw_query.replace("\n", ",").split(","))
+    return [query for query in expanded if query]
 
 
 async def _compare_product_response(

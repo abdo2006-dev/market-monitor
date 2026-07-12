@@ -237,6 +237,20 @@ class TestShopifyScraper:
         assert product["category"] == "Murder Mystery 2"
         assert product["url"] == "https://bloxshop.org/products/bat"
 
+    def test_expand_batch_queries_supports_url_friendly_lists(self):
+        from app.api.search_dashboard_settings import _expand_batch_queries
+
+        assert _expand_batch_queries([
+            "Bat,BattleAxe Set",
+            "Chroma Luger\nPhantom & Spectre Bundle",
+            "  ",
+        ]) == [
+            "Bat",
+            "BattleAxe Set",
+            "Chroma Luger",
+            "Phantom & Spectre Bundle",
+        ]
+
     def test_extract_storefront_graphql_product(self):
         from app.services.scraper import _extract_storefront_product
 
