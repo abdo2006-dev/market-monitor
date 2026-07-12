@@ -251,6 +251,18 @@ class TestShopifyScraper:
             "Phantom & Spectre Bundle",
         ]
 
+    def test_target_selection_prefers_exact_short_names_over_substrings(self):
+        from types import SimpleNamespace
+        from app.api.search_dashboard_settings import _target_selection_score
+
+        bat = SimpleNamespace(normalized_title="bat", category="Murder Mystery 2")
+        batwing = SimpleNamespace(normalized_title="batwing", category="Murder Mystery 2")
+        candleflame = SimpleNamespace(normalized_title="candleflame", category="Murder Mystery 2")
+        chroma_candleflame = SimpleNamespace(normalized_title="chroma candleflame", category="Murder Mystery 2")
+
+        assert _target_selection_score("Bat", bat) > _target_selection_score("Bat", batwing)
+        assert _target_selection_score("Candleflame", candleflame) > _target_selection_score("Candleflame", chroma_candleflame)
+
     def test_extract_storefront_graphql_product(self):
         from app.services.scraper import _extract_storefront_product
 

@@ -341,19 +341,9 @@ def _dedupe_batch_queries(raw_queries: list[str]) -> list[str]:
 
 
 def _select_batch_target_from_rows(rows, q: str):
-    norm = normalize_title(q)
     candidates = _filter_loaded_candidate_rows(rows, q)
     ranked = sorted(
-        (
-            (
-                product,
-                max(
-                    _comparison_score(norm, product.normalized_title),
-                    _match_score(norm, product.normalized_title),
-                ),
-            )
-            for product, _ in candidates
-        ),
+        ((product, _target_selection_score(q, product)) for product, _ in candidates),
         key=lambda item: item[1],
         reverse=True,
     )
@@ -489,7 +479,7 @@ async def _compare_product_response(
     if not target_product and q:
         rows = await _search_candidate_rows(db, q, 1000)
         ranked = sorted(
-            ((product, _comparison_score(normalize_title(q), product.normalized_title)) for product, _ in rows),
+            ((product, _target_selection_score(q, product)) for product, _ in rows),
             key=lambda item: item[1],
             reverse=True,
         )
@@ -633,6 +623,36 @@ def _comparison_score(query: str, candidate: str) -> float:
     if set(q_tokens).issubset(set(c_tokens)):
         return 0.9
     return SequenceMatcher(None, query, candidate).ratio()
+
+
+def _target_selection_score(query: str, product: Product) -> float:
+    query_norm = normalize_title(query)
+    title_norm = product.normalized_title or ""
+    if not query_norm or not title_norm:
+        return 0
+
+    query_tokens = query_norm.split()
+    title_tokens = title_norm.split()
+    query_base = _query_market_base_hint(query)
+    identity = _product_market_identity(product, base_hint=query_base)
+    score = max(
+        _comparison_score(query_norm, title_norm),
+        _comparison_score(query_base, identity["base"]),
+    )
+    if title_norm == query_norm:
+        score += 2
+    if identity["base"] == query_base:
+        score += 1
+    score -= abs(len(title_tokens) - len(query_tokens)) * 0.05
+
+    variant_prefixes = {"chroma"}
+    query_prefix = query_tokens[0] if query_tokens else ""
+    title_prefix = title_tokens[0] if title_tokens else ""
+    if title_prefix in variant_prefixes and query_prefix != title_prefix:
+        score -= 0.7
+    if query_prefix in variant_prefixes and title_prefix != query_prefix:
+        score -= 0.7
+    return score
 
 
 def _product_market_identity(product: Product, base_hint: Optional[str] = None) -> dict:
