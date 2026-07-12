@@ -290,10 +290,11 @@ async def _batch_compare_summary_response(db: AsyncSession, raw_queries: list[st
         .join(Competitor, Product.competitor_id == Competitor.id)
         .where(Product.active == True)
     )).all()
+    contexts = _build_loaded_product_contexts(rows)
 
     items = []
     for query in queries:
-        target_product = _select_batch_target_from_rows(rows, query)
+        target_product = _select_batch_target_from_contexts(contexts, query)
         if not target_product:
             items.append({
                 "query": query,
@@ -306,7 +307,7 @@ async def _batch_compare_summary_response(db: AsyncSession, raw_queries: list[st
             })
             continue
 
-        matches = _compare_target_from_loaded_rows(target_product, competitors, rows)
+        matches = _compare_target_from_loaded_contexts(target_product, competitors, contexts)
         priced_matches = [item for item in matches if item["price"] is not None]
         lowest = min(priced_matches, key=lambda item: item["price"]) if priced_matches else None
         items.append({
@@ -340,43 +341,65 @@ def _dedupe_batch_queries(raw_queries: list[str]) -> list[str]:
     return queries
 
 
-def _select_batch_target_from_rows(rows, q: str):
-    candidates = _filter_loaded_candidate_rows(rows, q)
+def _build_loaded_product_contexts(rows) -> list[dict]:
+    contexts = []
+    for product, competitor_name in rows:
+        identity = _product_market_identity(product)
+        contexts.append({
+            "product": product,
+            "competitor_name": competitor_name,
+            "haystack": f"{product.normalized_title or ''} {normalize_title(product.category or '')}",
+            "identity": identity,
+            "aliases": _comparison_aliases(identity["base"]),
+            "price": float(product.current_price) if product.current_price is not None else None,
+        })
+    return contexts
+
+
+def _select_batch_target_from_contexts(contexts: list[dict], q: str):
+    candidates = _filter_loaded_candidate_contexts(contexts, q)
     ranked = sorted(
-        ((product, _target_selection_score(q, product)) for product, _ in candidates),
+        ((context["product"], _target_selection_score(q, context["product"])) for context in candidates),
         key=lambda item: item[1],
         reverse=True,
     )
     return ranked[0][0] if ranked else None
 
 
-def _filter_loaded_candidate_rows(rows, q: str):
+def _filter_loaded_candidate_contexts(contexts: list[dict], q: str) -> list[dict]:
     norm = normalize_title(q)
     tokens = norm.split()
     if not tokens:
-        return rows
+        return contexts
     fuzzy_tokens = {t for token in tokens for t in _fuzzy_token_variants(token) if len(t) >= 2}
     if not fuzzy_tokens:
-        return rows
-    matches = []
-    for product, competitor_name in rows:
-        haystack = f"{product.normalized_title or ''} {normalize_title(product.category or '')}"
-        if any(token in haystack for token in fuzzy_tokens):
-            matches.append((product, competitor_name))
-    return matches
+        return contexts
+    return [
+        context for context in contexts
+        if any(token in context["haystack"] for token in fuzzy_tokens)
+    ]
 
 
-def _compare_target_from_loaded_rows(target_product: Product, competitors: list[Competitor], rows) -> list[dict]:
+def _compare_target_from_loaded_contexts(target_product: Product, competitors: list[Competitor], contexts: list[dict]) -> list[dict]:
     target_identity = _product_market_identity(target_product)
     aliases = _comparison_aliases(target_identity["base"])
     best_by_competitor = {}
-    for product, competitor_name in rows:
-        candidate_identity = _product_market_identity(product, base_hint=target_identity["base"])
+    for context in contexts:
+        product = context["product"]
+        candidate_identity = (
+            _product_market_identity(product, base_hint=target_identity["base"])
+            if target_identity["collection"] == "steal a brainrot"
+            else context["identity"]
+        )
         if not _collections_compatible(target_identity, candidate_identity):
             continue
         if candidate_identity["mutation"] != target_identity["mutation"]:
             continue
-        candidate_aliases = _comparison_aliases(candidate_identity["base"])
+        candidate_aliases = (
+            _comparison_aliases(candidate_identity["base"])
+            if target_identity["collection"] == "steal a brainrot"
+            else context["aliases"]
+        )
         score = max(
             _comparison_score(target_alias, candidate_alias)
             for target_alias in aliases
@@ -384,7 +407,7 @@ def _compare_target_from_loaded_rows(target_product: Product, competitors: list[
         )
         if score < 0.86:
             continue
-        price = float(product.current_price) if product.current_price is not None else None
+        price = context["price"]
         current = best_by_competitor.get(product.competitor_id)
         if not current or score > current["match_score"] or (
             score == current["match_score"] and price is not None and (
@@ -392,7 +415,7 @@ def _compare_target_from_loaded_rows(target_product: Product, competitors: list[
             )
         ):
             best_by_competitor[product.competitor_id] = {
-                "competitor": competitor_name,
+                "competitor": context["competitor_name"],
                 "item": product.title,
                 "category": product.category,
                 "price": price,
