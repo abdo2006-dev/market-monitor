@@ -217,6 +217,26 @@ class TestShopifyScraper:
         assert product["price"] == 3.50
         assert product["url"] == "https://example.com/products/rainbow-shiny-pet"
 
+    def test_extract_shopify_product_infers_category_from_description(self):
+        from app.services.scraper import _extract_shopify_product
+
+        raw = {
+            "id": 8978657706242,
+            "title": "Bat",
+            "handle": "bat",
+            "vendor": "BloxShop",
+            "product_type": "",
+            "body_html": "The Bat Knife is a godly Murder Mystery 2 weapon.",
+            "variants": [{"id": 46031573844226, "available": True, "price": "5.99"}],
+            "images": [{"src": "https://cdn.example/bat.png"}],
+        }
+
+        product = _extract_shopify_product(raw, "https://bloxshop.org", None)
+        assert product["title"] == "Bat"
+        assert product["price"] == 5.99
+        assert product["category"] == "Murder Mystery 2"
+        assert product["url"] == "https://bloxshop.org/products/bat"
+
     def test_extract_storefront_graphql_product(self):
         from app.services.scraper import _extract_storefront_product
 

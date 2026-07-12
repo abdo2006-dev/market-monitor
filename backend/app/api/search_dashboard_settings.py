@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, or_
 from typing import Optional
@@ -12,6 +13,11 @@ from app.utils.text_normalizer import normalize_title
 search_router = APIRouter(prefix="/api/search", tags=["search"])
 dashboard_router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 settings_router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+
+class BatchCompareRequest(BaseModel):
+    queries: list[str] = Field(..., min_length=1, max_length=50)
+    include_unmatched: bool = True
 
 INFERRED_SALE_EVENT_TYPES = ("stock_out",)
 REMOVED_PRODUCT_EVENT_TYPES = ("product_removed",)
@@ -196,6 +202,37 @@ async def compare_product(
     product_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
+    return await _compare_product_response(db, q=q, product_id=product_id)
+
+
+@search_router.post("/batch-compare")
+async def batch_compare_products(
+    payload: BatchCompareRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    results = []
+    seen = set()
+    for raw_query in payload.queries:
+        query = raw_query.strip()
+        if not query or query in seen:
+            continue
+        seen.add(query)
+        result = await _compare_product_response(
+            db,
+            q=query,
+            include_unmatched=payload.include_unmatched,
+        )
+        result["query"] = query
+        results.append(result)
+    return {"items": results, "total": len(results)}
+
+
+async def _compare_product_response(
+    db: AsyncSession,
+    q: Optional[str] = None,
+    product_id: Optional[int] = None,
+    include_unmatched: bool = True,
+):
     target_product = None
     if product_id is not None:
         result = await db.execute(select(Product).where(Product.id == product_id))
@@ -265,6 +302,8 @@ async def compare_product(
         item["product"]["current_price"] is None if item["product"] else True,
         item["product"]["current_price"] if item["product"] else 0,
     ))
+    if not include_unmatched:
+        items = [item for item in items if item["product"]]
     target = ProductOut.model_validate(target_product).model_dump()
     return {
         "target": target,

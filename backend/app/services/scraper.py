@@ -8,7 +8,7 @@ from typing import Optional
 from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from app.utils.price_parser import parse_price
-from app.utils.text_normalizer import normalize_url
+from app.utils.text_normalizer import normalize_title, normalize_url
 
 logger = logging.getLogger(__name__)
 
@@ -808,6 +808,7 @@ def _extract_shopify_product(raw: dict, base_url: str, category: Optional[str]) 
     if not title:
         return None
 
+    product_category = _shopify_product_category(raw, category)
     return {
         "title": title,
         "price": price,
@@ -817,8 +818,41 @@ def _extract_shopify_product(raw: dict, base_url: str, category: Optional[str]) 
         "stock_status": "in_stock" if variant.get("available", True) else "out_of_stock",
         "sku": variant.get("sku"),
         "external_id": f"{product_id}:{variant_id}" if variant_id else str(product_id),
-        "category": category or raw.get("vendor") or raw.get("product_type") or "Uncategorized",
+        "category": product_category,
     }
+
+
+def _shopify_product_category(raw: dict, category: Optional[str]) -> str:
+    if category:
+        return category
+
+    explicit = (raw.get("product_type") or "").strip()
+    if explicit:
+        return explicit
+
+    text = " ".join(
+        str(value or "")
+        for value in [
+            raw.get("title"),
+            raw.get("body_html"),
+            " ".join(raw.get("tags") or []),
+        ]
+    ).lower()
+    if "murder mystery 2" in text or " mm2 " in f" {text} ":
+        return "Murder Mystery 2"
+    if "adopt me" in text:
+        return "Adopt Me"
+    if "grow a garden" in text or " gag " in f" {text} ":
+        return "Grow a Garden"
+    if "steal a brainrot" in text or "brainrot" in text:
+        return "Steal a Brainrot"
+    if "blox fruit" in text:
+        return "Blox Fruits"
+
+    vendor = (raw.get("vendor") or "").strip()
+    if vendor and normalize_title(vendor) not in {"bloxshop", "blox shop", "shopify"}:
+        return vendor
+    return "Uncategorized"
 
 
 def _extract_salla_product(raw: dict, base_url: str, category: Optional[str] = None,
