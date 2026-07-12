@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, or_
@@ -233,6 +234,20 @@ async def batch_compare_products_get(
     )
 
 
+@search_router.get("/batch-compare-summary")
+async def batch_compare_summary_get(
+    queries: list[str] = Query(..., min_length=1),
+    format: str = Query("json", pattern="^(json|markdown|csv)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    summary = await _batch_compare_summary_response(db, _expand_batch_queries(queries))
+    if format == "markdown":
+        return PlainTextResponse(_batch_compare_summary_markdown(summary))
+    if format == "csv":
+        return PlainTextResponse(_batch_compare_summary_csv(summary), media_type="text/csv")
+    return summary
+
+
 async def _batch_compare_response(
     db: AsyncSession,
     raw_queries: list[str],
@@ -265,6 +280,200 @@ def _expand_batch_queries(raw_queries: list[str]) -> list[str]:
     for raw_query in raw_queries:
         expanded.extend(part.strip() for part in raw_query.replace("\n", ",").split(","))
     return [query for query in expanded if query]
+
+
+async def _batch_compare_summary_response(db: AsyncSession, raw_queries: list[str]) -> dict:
+    queries = _dedupe_batch_queries(raw_queries)
+    competitors = (await db.execute(select(Competitor).where(Competitor.active == True))).scalars().all()
+    rows = (await db.execute(
+        select(Product, Competitor.name.label("cname"))
+        .join(Competitor, Product.competitor_id == Competitor.id)
+        .where(Product.active == True)
+    )).all()
+
+    items = []
+    for query in queries:
+        target_product = _select_batch_target_from_rows(rows, query)
+        if not target_product:
+            items.append({
+                "query": query,
+                "matched_item": None,
+                "category": None,
+                "lowest_price": None,
+                "lowest_seller": None,
+                "total_matches": 0,
+                "competitor_prices": [],
+            })
+            continue
+
+        matches = _compare_target_from_loaded_rows(target_product, competitors, rows)
+        priced_matches = [item for item in matches if item["price"] is not None]
+        lowest = min(priced_matches, key=lambda item: item["price"]) if priced_matches else None
+        items.append({
+            "query": query,
+            "matched_item": target_product.title,
+            "category": target_product.category,
+            "lowest_price": lowest["price"] if lowest else None,
+            "lowest_seller": lowest["competitor"] if lowest else None,
+            "currency": lowest["currency"] if lowest else None,
+            "total_matches": len(matches),
+            "competitor_prices": matches,
+        })
+
+    return {"items": items, "total": len(items)}
+
+
+def _dedupe_batch_queries(raw_queries: list[str]) -> list[str]:
+    queries = []
+    seen = set()
+    for raw_query in raw_queries:
+        query = raw_query.strip()
+        if not query or query in seen:
+            continue
+        seen.add(query)
+        if len(queries) >= MAX_BATCH_COMPARE_QUERIES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Batch compare supports up to {MAX_BATCH_COMPARE_QUERIES} queries per request.",
+            )
+        queries.append(query)
+    return queries
+
+
+def _select_batch_target_from_rows(rows, q: str):
+    norm = normalize_title(q)
+    candidates = _filter_loaded_candidate_rows(rows, q)
+    ranked = sorted(
+        (
+            (
+                product,
+                max(
+                    _comparison_score(norm, product.normalized_title),
+                    _match_score(norm, product.normalized_title),
+                ),
+            )
+            for product, _ in candidates
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    return ranked[0][0] if ranked else None
+
+
+def _filter_loaded_candidate_rows(rows, q: str):
+    norm = normalize_title(q)
+    tokens = norm.split()
+    if not tokens:
+        return rows
+    fuzzy_tokens = {t for token in tokens for t in _fuzzy_token_variants(token) if len(t) >= 2}
+    if not fuzzy_tokens:
+        return rows
+    matches = []
+    for product, competitor_name in rows:
+        haystack = f"{product.normalized_title or ''} {normalize_title(product.category or '')}"
+        if any(token in haystack for token in fuzzy_tokens):
+            matches.append((product, competitor_name))
+    return matches
+
+
+def _compare_target_from_loaded_rows(target_product: Product, competitors: list[Competitor], rows) -> list[dict]:
+    target_identity = _product_market_identity(target_product)
+    aliases = _comparison_aliases(target_identity["base"])
+    best_by_competitor = {}
+    for product, competitor_name in rows:
+        candidate_identity = _product_market_identity(product, base_hint=target_identity["base"])
+        if not _collections_compatible(target_identity, candidate_identity):
+            continue
+        if candidate_identity["mutation"] != target_identity["mutation"]:
+            continue
+        candidate_aliases = _comparison_aliases(candidate_identity["base"])
+        score = max(
+            _comparison_score(target_alias, candidate_alias)
+            for target_alias in aliases
+            for candidate_alias in candidate_aliases
+        )
+        if score < 0.86:
+            continue
+        price = float(product.current_price) if product.current_price is not None else None
+        current = best_by_competitor.get(product.competitor_id)
+        if not current or score > current["match_score"] or (
+            score == current["match_score"] and price is not None and (
+                current["price"] is None or price < current["price"]
+            )
+        ):
+            best_by_competitor[product.competitor_id] = {
+                "competitor": competitor_name,
+                "item": product.title,
+                "category": product.category,
+                "price": price,
+                "currency": product.currency,
+                "url": product.url,
+                "match_score": round(score, 3),
+            }
+
+    matches = [best_by_competitor[competitor.id] for competitor in competitors if competitor.id in best_by_competitor]
+    matches.sort(key=lambda item: (item["price"] is None, item["price"] or 0, item["competitor"]))
+    return matches
+
+
+def _batch_compare_summary_markdown(summary: dict) -> str:
+    lines = [
+        "| Product | Matched item | Category | Lowest price | Lowest seller | Competitor prices |",
+        "|---|---|---|---:|---|---|",
+    ]
+    for item in summary["items"]:
+        lowest_price = _format_price(item.get("lowest_price"), item.get("currency"))
+        competitor_prices = "; ".join(
+            f"{price['competitor']}: {_format_price(price.get('price'), price.get('currency'))}"
+            for price in item.get("competitor_prices", [])
+        ) or "No match"
+        lines.append("| " + " | ".join(
+            _escape_markdown_table(value)
+            for value in (
+                item.get("query"),
+                item.get("matched_item") or "No match",
+                item.get("category") or "",
+                lowest_price,
+                item.get("lowest_seller") or "",
+                competitor_prices,
+            )
+        ) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def _batch_compare_summary_csv(summary: dict) -> str:
+    lines = ["Product,Matched item,Category,Lowest price,Lowest seller,Competitor prices"]
+    for item in summary["items"]:
+        competitor_prices = "; ".join(
+            f"{price['competitor']}: {_format_price(price.get('price'), price.get('currency'))}"
+            for price in item.get("competitor_prices", [])
+        )
+        values = [
+            item.get("query"),
+            item.get("matched_item") or "No match",
+            item.get("category") or "",
+            _format_price(item.get("lowest_price"), item.get("currency")),
+            item.get("lowest_seller") or "",
+            competitor_prices,
+        ]
+        lines.append(",".join(_escape_csv_value(value) for value in values))
+    return "\n".join(lines) + "\n"
+
+
+def _format_price(price, currency: Optional[str]) -> str:
+    if price is None:
+        return "N/A"
+    symbol = "$" if currency == "USD" else f"{currency or ''} "
+    return f"{symbol}{float(price):.2f}"
+
+
+def _escape_markdown_table(value) -> str:
+    return str(value or "").replace("|", "\\|").replace("\n", " ")
+
+
+def _escape_csv_value(value) -> str:
+    text = str(value or "")
+    return '"' + text.replace('"', '""') + '"'
 
 
 async def _compare_product_response(
