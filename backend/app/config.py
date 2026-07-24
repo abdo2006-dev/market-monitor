@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     DEFAULT_CURRENCY: str = "USD"
     DISCORD_NOTIFICATIONS_ENABLED: bool = True
     DISCORD_DEFAULT_WEBHOOK_URL: Optional[str] = None
-    USER_AGENT: str = "MarketMonitor/1.0 (price monitoring bot)"
+    USER_AGENT: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     PLAYWRIGHT_HEADLESS: bool = True
     DEFAULT_SCAN_INTERVAL_MINUTES: int = 60
     DEFAULT_MAX_PAGES: int = 5
