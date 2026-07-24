@@ -33,7 +33,7 @@ export default function CompetitorsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['competitors'] }),
   })
   const scanAllMut = useMutation({
-    mutationFn: scanAllCompetitors,
+    mutationFn: () => scanAllCompetitors(competitors),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['competitors'] }),
   })
 
@@ -75,10 +75,12 @@ export default function CompetitorsPage() {
       {scanAllMut.data && (
         <div style={{
           marginBottom: 16, padding: '10px 12px', borderRadius: 8,
-          background: '#22c55e14', border: '1px solid #22c55e33', color: '#86efac',
+          background: scanAllMut.data.failed ? '#ef444414' : '#22c55e14',
+          border: `1px solid ${scanAllMut.data.failed ? '#ef444433' : '#22c55e33'}`,
+          color: scanAllMut.data.failed ? '#fca5a5' : '#86efac',
           fontSize: 13,
         }}>
-          {scanAllMut.data.message}: {scanAllMut.data.completed || 0} completed, {scanAllMut.data.queued || 0} queued, {scanAllMut.data.skipped || 0} skipped.
+          {scanAllMut.data.message}: {scanAllMut.data.completed || 0} completed, {scanAllMut.data.queued || 0} queued, {scanAllMut.data.failed || 0} failed.
         </div>
       )}
 

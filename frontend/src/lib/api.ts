@@ -11,7 +11,49 @@ export const seedDefaultCompetitors = () => api.post('/competitors/seed-defaults
 export const updateCompetitor = (id: number, data: any) => api.put(`/competitors/${id}`, data).then(r => r.data)
 export const deleteCompetitor = (id: number) => api.delete(`/competitors/${id}`)
 export const scanNow = (id: number) => api.post(`/competitors/${id}/scan-now`).then(r => r.data)
-export const scanAllCompetitors = () => api.post('/competitors/scan-all').then(r => r.data)
+export const scanAllCompetitors = async (competitors: any[], concurrency = 4) => {
+  const activeCompetitors = competitors.filter(competitor => competitor.active)
+  const items: any[] = []
+  let cursor = 0
+
+  async function worker() {
+    while (cursor < activeCompetitors.length) {
+      const competitor = activeCompetitors[cursor++]
+      try {
+        const result = await scanNow(competitor.id)
+        items.push({
+          competitor_id: competitor.id,
+          name: competitor.name,
+          status: result.result?.status || (result.task_id ? 'queued' : 'completed'),
+          result,
+        })
+      } catch (error: any) {
+        items.push({
+          competitor_id: competitor.id,
+          name: competitor.name,
+          status: 'failed',
+          error: error?.response?.data?.detail || error?.message || 'Scan failed',
+        })
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, activeCompetitors.length) }, () => worker())
+  )
+
+  const failed = items.filter(item => item.status === 'failed').length
+  const queued = items.filter(item => item.status === 'queued').length
+  const completed = items.length - failed - queued
+  return {
+    message: failed ? 'Scan all finished with errors' : 'Scan all completed',
+    total: activeCompetitors.length,
+    completed,
+    queued,
+    failed,
+    items,
+  }
+}
 export const getCompetitor = (id: number) => api.get(`/competitors/${id}`).then(r => r.data)
 
 // Products
