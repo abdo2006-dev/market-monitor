@@ -11,6 +11,7 @@ export const seedDefaultCompetitors = () => api.post('/competitors/seed-defaults
 export const updateCompetitor = (id: number, data: any) => api.put(`/competitors/${id}`, data).then(r => r.data)
 export const deleteCompetitor = (id: number) => api.delete(`/competitors/${id}`)
 export const scanNow = (id: number) => api.post(`/competitors/${id}/scan-now`).then(r => r.data)
+export const scanAllCompetitors = () => api.post('/competitors/scan-all').then(r => r.data)
 export const getCompetitor = (id: number) => api.get(`/competitors/${id}`).then(r => r.data)
 
 // Products

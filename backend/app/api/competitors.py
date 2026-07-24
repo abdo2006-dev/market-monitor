@@ -1,9 +1,12 @@
+import asyncio
+from datetime import datetime, timezone, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from typing import List
 from app.database import get_db
-from app.models import Competitor
+from app.models import Competitor, ScrapeRun
 from app.schemas import CompetitorCreate, CompetitorUpdate, CompetitorOut
 from app.config import settings
 from app.services.default_competitors import default_competitor_payloads
@@ -11,6 +14,7 @@ from app.services.default_competitors import default_competitor_payloads
 router = APIRouter(prefix="/api/competitors", tags=["competitors"])
 
 SHOPIFY_SELECTOR_CONFIG = {"discover_collections": True, "include_all_products": True}
+SCAN_ALL_INLINE_CONCURRENCY = 4
 
 
 @router.get("", response_model=List[CompetitorOut])
@@ -76,6 +80,75 @@ async def delete_competitor(competitor_id: int, db: AsyncSession = Depends(get_d
     await db.delete(competitor)
 
 
+@router.post("/scan-all")
+async def scan_all(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Competitor).where(Competitor.active == True).order_by(Competitor.name))
+    competitors = result.scalars().all()
+    if not competitors:
+        return {"message": "No active competitors to scan", "total": 0, "queued": 0, "completed": 0, "skipped": 0, "items": []}
+
+    runnable = []
+    items = []
+    for competitor in competitors:
+        if await _has_recent_running_scan(db, competitor.id):
+            items.append({
+                "competitor_id": competitor.id,
+                "name": competitor.name,
+                "status": "skipped",
+                "reason": "Scan already running",
+            })
+            continue
+        runnable.append(competitor)
+
+    queued = []
+    inline = []
+    if settings.RUN_SCANS_INLINE:
+        inline = runnable
+    else:
+        for competitor in runnable:
+            if competitor.scrape_type in {"shopify_json", "salla_json"}:
+                inline.append(competitor)
+            else:
+                queued.append(competitor)
+
+    for competitor in queued:
+        from app.workers.tasks import scrape_competitor_task
+        task = scrape_competitor_task.delay(competitor.id)
+        items.append({
+            "competitor_id": competitor.id,
+            "name": competitor.name,
+            "status": "queued",
+            "task_id": task.id,
+        })
+
+    completed = []
+    if inline:
+        from app.workers.tasks import _scrape_competitor_async
+        semaphore = asyncio.Semaphore(SCAN_ALL_INLINE_CONCURRENCY)
+
+        async def run_scan(competitor: Competitor):
+            async with semaphore:
+                scan_result = await _scrape_competitor_async(competitor.id)
+                return {
+                    "competitor_id": competitor.id,
+                    "name": competitor.name,
+                    "status": scan_result.get("status") if scan_result else "skipped",
+                    "result": scan_result,
+                }
+
+        completed = await asyncio.gather(*(run_scan(competitor) for competitor in inline))
+        items.extend(completed)
+
+    return {
+        "message": "Scan all completed" if inline and not queued else "Scan all started",
+        "total": len(competitors),
+        "queued": len(queued),
+        "completed": len(completed),
+        "skipped": sum(1 for item in items if item["status"] == "skipped"),
+        "items": items,
+    }
+
+
 @router.post("/{competitor_id}/scan-now")
 async def scan_now(competitor_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Competitor).where(Competitor.id == competitor_id))
@@ -93,6 +166,20 @@ async def scan_now(competitor_id: int, db: AsyncSession = Depends(get_db)):
     from app.workers.tasks import scrape_competitor_task
     task = scrape_competitor_task.delay(competitor_id)
     return {"message": "Scan queued", "task_id": task.id}
+
+
+async def _has_recent_running_scan(db: AsyncSession, competitor_id: int) -> bool:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+    running_result = await db.execute(
+        select(ScrapeRun).where(
+            and_(
+                ScrapeRun.competitor_id == competitor_id,
+                ScrapeRun.status == "running",
+                ScrapeRun.started_at > cutoff,
+            )
+        )
+    )
+    return running_result.scalar_one_or_none() is not None
 
 
 def _normalize_competitor_payload(payload: dict) -> dict:

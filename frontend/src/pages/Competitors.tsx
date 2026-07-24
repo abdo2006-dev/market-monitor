@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getCompetitors, createCompetitor, updateCompetitor, deleteCompetitor, scanNow, seedDefaultCompetitors } from '../lib/api'
+import { getCompetitors, createCompetitor, updateCompetitor, deleteCompetitor, scanNow, scanAllCompetitors, seedDefaultCompetitors } from '../lib/api'
 import { Card, Button, Table, Tr, Td, Loading, EmptyState, ErrorState } from '../components/ui'
 import { PageHeader } from '../components/layout/Sidebar'
 import { timeAgo } from '../lib/utils'
@@ -32,6 +32,10 @@ export default function CompetitorsPage() {
     mutationFn: seedDefaultCompetitors,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['competitors'] }),
   })
+  const scanAllMut = useMutation({
+    mutationFn: scanAllCompetitors,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['competitors'] }),
+  })
 
   const handleScanNow = async (id: number) => {
     setScanningId(id)
@@ -45,13 +49,38 @@ export default function CompetitorsPage() {
   if (isLoading) return <div style={{ padding: '2rem' }}><Loading /></div>
   if (error) return <div style={{ padding: '2rem' }}><ErrorState message="Failed to load competitors." /></div>
 
+  const activeCompetitors = competitors.filter((competitor: any) => competitor.active)
+  const scanControlsDisabled = scanAllMut.isPending || scanningId !== null
+
   return (
     <div style={{ padding: '2rem' }}>
       <PageHeader
         title="Competitors"
         subtitle={`${competitors.length} competitor${competitors.length !== 1 ? 's' : ''} configured`}
-        action={<Button onClick={() => setModalOpen(true)}>+ Add Competitor</Button>}
+        action={
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <Button
+              variant="secondary"
+              onClick={() => scanAllMut.mutate()}
+              loading={scanAllMut.isPending}
+              disabled={activeCompetitors.length === 0 || scanControlsDisabled}
+            >
+              ▶ Scan All
+            </Button>
+            <Button onClick={() => setModalOpen(true)}>+ Add Competitor</Button>
+          </div>
+        }
       />
+
+      {scanAllMut.data && (
+        <div style={{
+          marginBottom: 16, padding: '10px 12px', borderRadius: 8,
+          background: '#22c55e14', border: '1px solid #22c55e33', color: '#86efac',
+          fontSize: 13,
+        }}>
+          {scanAllMut.data.message}: {scanAllMut.data.completed || 0} completed, {scanAllMut.data.queued || 0} queued, {scanAllMut.data.skipped || 0} skipped.
+        </div>
+      )}
 
       <Card>
         {competitors.length === 0 ? (
@@ -96,7 +125,13 @@ export default function CompetitorsPage() {
                 </Td>
                 <Td>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                    <Button size="sm" variant="secondary" onClick={() => handleScanNow(c.id)} loading={scanningId === c.id}>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => handleScanNow(c.id)}
+                      loading={scanningId === c.id}
+                      disabled={scanControlsDisabled || !c.active}
+                    >
                       ▶ Scan
                     </Button>
                     <Button size="sm" variant="ghost" onClick={() => handleToggleActive(c)}>
