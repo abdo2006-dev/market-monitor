@@ -102,7 +102,7 @@ def _collection_scrape_payload(competitor: Competitor, collection_url: str, max_
     handle = _collection_handle(collection_url)
     if handle:
         selector_config["collection_handles"] = [handle]
-        selector_config["prefer_storefront_graphql"] = True
+        selector_config["prefer_storefront_graphql"] = False
 
     return {
         "id": competitor.id,

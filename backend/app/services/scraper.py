@@ -15,6 +15,21 @@ logger = logging.getLogger(__name__)
 MAX_PAGES_DEFAULT = 5
 PAGE_DELAY_DEFAULT = 2.0
 TIMEOUT_DEFAULT = 30000  # ms
+GENERIC_SHOPIFY_VENDORS = {
+    "bloxloot",
+    "bloxshop",
+    "blox shop",
+    "bloxybarn",
+    "bloxy barn",
+    "bloxy store",
+    "buyblox",
+    "luger gg",
+    "mm2cheap",
+    "petpatch gg",
+    "shopbloxs",
+    "shopify",
+    "zyron",
+}
 
 
 def _detect_stock(text: Optional[str]) -> str:
@@ -125,7 +140,6 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
     listing_urls = competitor.get("listing_urls") or []
     headers = {"User-Agent": user_agent, "Accept": "application/json, text/html;q=0.9"}
     all_products = []
-    seen_urls = set()
 
     timeout_seconds = selector_config.get("request_timeout_seconds", 30)
     connector = _aiohttp_connector(aiohttp)
@@ -139,6 +153,16 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
             if all_products:
                 return all_products
 
+        if selector_config.get("include_all_products", True) and selector_config.get("prefer_all_products_first", True):
+            all_products = await _scrape_shopify_json_targets(
+                session,
+                base_url,
+                [{"url": f"{base_url}/products.json", "category": None}],
+                max_pages,
+            )
+            if all_products:
+                return all_products
+
         collections = []
         if selector_config.get("discover_collections", True):
             collections = await _shopify_collections(session, base_url)
@@ -146,28 +170,7 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
         if not targets:
             targets = [{"url": f"{base_url}/products.json", "category": None}]
 
-        for target in targets:
-            for page_num in range(1, max_pages + 1):
-                url = f"{target['url']}{'&' if '?' in target['url'] else '?'}limit=250&page={page_num}"
-                try:
-                    async with session.get(url) as resp:
-                        if resp.status >= 400:
-                            logger.warning("Shopify JSON returned %s for %s", resp.status, url)
-                            break
-                        data = await resp.json(content_type=None)
-                except Exception as e:
-                    logger.warning("Could not fetch Shopify JSON %s: %s", url, e)
-                    break
-
-                products = data.get("products") or []
-                if not products:
-                    break
-
-                for raw in products:
-                    product = _extract_shopify_product(raw, base_url, target.get("category"))
-                    if product and product["url"] not in seen_urls:
-                        seen_urls.add(product["url"])
-                        all_products.append(product)
+        all_products = await _scrape_shopify_json_targets(session, base_url, targets, max_pages)
 
         if not all_products:
             all_products = await _scrape_custom_storefront_fallback(
@@ -177,6 +180,34 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
                 max_pages=max_pages,
             )
 
+    return all_products
+
+
+async def _scrape_shopify_json_targets(session, base_url: str, targets: list[dict], max_pages: int) -> list[dict]:
+    all_products = []
+    seen_urls = set()
+    for target in targets:
+        for page_num in range(1, max_pages + 1):
+            url = f"{target['url']}{'&' if '?' in target['url'] else '?'}limit=250&page={page_num}"
+            try:
+                async with session.get(url) as resp:
+                    if resp.status >= 400:
+                        logger.warning("Shopify JSON returned %s for %s", resp.status, url)
+                        break
+                    data = await resp.json(content_type=None)
+            except Exception as e:
+                logger.warning("Could not fetch Shopify JSON %s: %s", url, e)
+                break
+
+            products = data.get("products") or []
+            if not products:
+                break
+
+            for raw in products:
+                product = _extract_shopify_product(raw, base_url, target.get("category"))
+                if product and product["url"] not in seen_urls:
+                    seen_urls.add(product["url"])
+                    all_products.append(product)
     return all_products
 
 
@@ -850,7 +881,7 @@ def _shopify_product_category(raw: dict, category: Optional[str]) -> str:
         return "Blox Fruits"
 
     vendor = (raw.get("vendor") or "").strip()
-    if vendor and normalize_title(vendor) not in {"bloxshop", "blox shop", "shopify"}:
+    if vendor and normalize_title(vendor) not in GENERIC_SHOPIFY_VENDORS:
         return vendor
     return "Uncategorized"
 

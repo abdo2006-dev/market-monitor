@@ -237,6 +237,22 @@ class TestShopifyScraper:
         assert product["category"] == "Murder Mystery 2"
         assert product["url"] == "https://bloxshop.org/products/bat"
 
+    def test_extract_shopify_product_ignores_generic_store_vendor(self):
+        from app.services.scraper import _extract_shopify_product
+
+        raw = {
+            "id": 8670239064237,
+            "title": "Big Ice Serpent",
+            "handle": "big-ice-serpent-1",
+            "vendor": "PetPatch.GG",
+            "product_type": "",
+            "variants": [{"id": 46884202152109, "available": True, "price": "97.77"}],
+            "images": [],
+        }
+
+        product = _extract_shopify_product(raw, "https://petpatch.gg", None)
+        assert product["category"] == "Uncategorized"
+
     def test_expand_batch_queries_supports_url_friendly_lists(self):
         from app.api.search_dashboard_settings import _expand_batch_queries
 
@@ -262,6 +278,15 @@ class TestShopifyScraper:
 
         assert _target_selection_score("Bat", bat) > _target_selection_score("Bat", batwing)
         assert _target_selection_score("Candleflame", candleflame) > _target_selection_score("Candleflame", chroma_candleflame)
+
+    def test_generic_item_type_collections_are_compatible(self):
+        from app.api.search_dashboard_settings import _market_identity, _collections_compatible
+
+        knife = _market_identity("chroma luger", "Knife")
+        mm2 = _market_identity("chroma luger", "Murder Mystery 2")
+
+        assert knife["collection"] == "unknown"
+        assert _collections_compatible(knife, mm2)
 
     def test_extract_storefront_graphql_product(self):
         from app.services.scraper import _extract_storefront_product
@@ -568,6 +593,27 @@ class TestFuzzySearch:
 
 
 class TestCollectionExports:
+    def test_collection_scrape_payload_tries_collection_json_before_graphql(self):
+        from types import SimpleNamespace
+        from app.api.exports import _collection_scrape_payload
+
+        competitor = SimpleNamespace(
+            id=9,
+            base_url="https://bloxshop.org/",
+            listing_urls=[],
+            selector_config={},
+            scrape_type="shopify_json",
+        )
+        payload = _collection_scrape_payload(
+            competitor,
+            "https://bloxshop.org/collections/steal-a-brainrot",
+            5,
+        )
+
+        assert payload["listing_urls"] == ["https://bloxshop.org/collections/steal-a-brainrot"]
+        assert payload["selector_config"]["collection_handles"] == ["steal-a-brainrot"]
+        assert payload["selector_config"]["prefer_storefront_graphql"] is False
+
     def test_export_rows_include_llm_friendly_fields(self):
         from types import SimpleNamespace
         from app.api.exports import _export_rows

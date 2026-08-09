@@ -61,6 +61,9 @@ BRAINROT_CATEGORY_MARKERS = ("brainrot", "steal a brainrot", "escape tsunami")
 GENERIC_COLLECTION_TOKENS = {
     "", "uncategorized", "roblox", "roblox marketplace", "marketplace",
     "best selling weapons and pets", "best-selling weapons and pets", "bloxy store",
+    "knife", "knives", "gun", "guns", "weapon", "weapons", "bundle", "bundles",
+    "bloxloot", "bloxshop", "blox shop", "bloxybarn", "bloxy barn", "buyblox",
+    "luger gg", "mm2cheap", "petpatch gg", "shopbloxs", "shopify", "zyron",
 }
 COLLECTION_ALIASES = {
     "adopt me": ("adopt me", "adoptme", "adm"),
