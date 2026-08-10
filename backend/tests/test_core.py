@@ -620,6 +620,17 @@ class TestCollectionExports:
         assert payload["selector_config"]["collection_handles"] == ["steal-a-brainrot"]
         assert payload["selector_config"]["prefer_storefront_graphql"] is False
 
+    def test_collection_export_matches_saved_brainrot_categories(self):
+        from types import SimpleNamespace
+        from app.api.exports import _product_matches_collection
+
+        url = "https://bloxloot.gg/collections/steal-a-brainrot"
+
+        assert _product_matches_collection(SimpleNamespace(category="Steal a Brainrot", title="Esok Sekolah"), url)
+        assert _product_matches_collection(SimpleNamespace(category="divine brainrots", title="Divine Esok Sekolah"), url)
+        assert _product_matches_collection(SimpleNamespace(category="BEST SAB BUNDLES", title="4X Secret Bundle"), url)
+        assert not _product_matches_collection(SimpleNamespace(category="Murder Mystery 2", title="Bat"), url)
+
     def test_export_rows_include_llm_friendly_fields(self):
         from types import SimpleNamespace
         from app.api.exports import _export_rows

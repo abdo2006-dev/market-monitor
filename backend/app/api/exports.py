@@ -13,8 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
-from app.models import Competitor
+from app.models import Competitor, Product
 from app.services.scraper import scrape_competitor
+from app.utils.text_normalizer import normalize_title
 
 router = APIRouter(prefix="/api/exports", tags=["exports"])
 
@@ -60,6 +61,8 @@ async def export_collection_prices(
         headless=settings.PLAYWRIGHT_HEADLESS,
         user_agent=settings.USER_AGENT,
     )
+    if not products:
+        products = await _saved_collection_products(db, competitor, clean_collection_url)
     rows = _export_rows(competitor, clean_collection_url, products)
     filename = _export_filename(competitor.name, clean_collection_url, format)
 
@@ -134,6 +137,67 @@ def _export_rows(competitor: Competitor, collection_url: str, products: list[dic
         })
     rows.sort(key=lambda row: ((row["title"] or "").lower(), row["price"] is None, row["price"] or 0))
     return rows
+
+
+async def _saved_collection_products(db: AsyncSession, competitor: Competitor, collection_url: str) -> list[dict]:
+    result = await db.execute(
+        select(Product)
+        .where(Product.competitor_id == competitor.id, Product.active == True)
+        .order_by(Product.title.asc())
+    )
+    products = []
+    for product in result.scalars().all():
+        if not _product_matches_collection(product, collection_url):
+            continue
+        products.append({
+            "title": product.title,
+            "price": float(product.current_price) if product.current_price is not None else None,
+            "currency": product.currency,
+            "url": product.url,
+            "image_url": product.image_url,
+            "stock_status": product.stock_status,
+            "sku": product.sku,
+            "external_id": product.external_id,
+            "category": product.category,
+        })
+    return products
+
+
+def _product_matches_collection(product: Product, collection_url: str) -> bool:
+    aliases = _collection_aliases(collection_url)
+    category = normalize_title(product.category or "")
+    title = normalize_title(product.title or "")
+    haystack = f"{category} {title}".strip()
+    return any(_collection_alias_matches(alias, category, haystack) for alias in aliases)
+
+
+def _collection_aliases(collection_url: str) -> list[str]:
+    handle = _collection_handle(collection_url) or ""
+    normalized = normalize_title(handle.replace("-", " "))
+    aliases = [normalized]
+    if "brainrot" in normalized:
+        aliases.extend(["brainrot", "brainrots", "sab"])
+    if "murder mystery" in normalized or normalized == "mm2":
+        aliases.extend(["murder mystery 2", "mm2"])
+    if "grow a garden" in normalized or normalized in {"gag", "gag2"}:
+        aliases.extend(["grow a garden", "grow a garden 2", "gag", "gag2"])
+    if "adopt me" in normalized or normalized == "adm":
+        aliases.extend(["adopt me", "adm"])
+    if "blox fruit" in normalized:
+        aliases.extend(["blox fruits", "blox fruit"])
+    return list(dict.fromkeys(alias for alias in aliases if alias))
+
+
+def _collection_alias_matches(alias: str, category: str, haystack: str) -> bool:
+    if not alias:
+        return False
+    if alias == category:
+        return True
+    if f" {alias} " in f" {haystack} ":
+        return True
+    compact_alias = alias.replace(" ", "")
+    compact_category = category.replace(" ", "")
+    return bool(compact_alias and compact_alias == compact_category)
 
 
 def _csv_body(rows: list[dict]) -> str:
