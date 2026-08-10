@@ -4,6 +4,25 @@ A self-hosted, private competitor price-monitoring system for e-commerce busines
 
 ---
 
+## 📚 Documentation
+
+The project is undergoing a V2 rearchitecture. Engineering documentation lives in [`docs/`](docs/):
+
+| Start here | |
+|---|---|
+| [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) | Current phase, baseline, known issues, next task |
+| [`AGENTS.md`](AGENTS.md) | Rules for coding agents working in this repository |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Architectural risk register and the V2 target |
+| [`docs/CURRENT_SYSTEM.md`](docs/CURRENT_SYSTEM.md) | Audit of the system as built |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Operational procedures and troubleshooting |
+| [`docs/adr/`](docs/adr/) | Architecture decision records |
+
+Also: [DATA_FLOW](docs/DATA_FLOW.md) · [DOMAIN_MODEL](docs/DOMAIN_MODEL.md) · [SCRAPING_ARCHITECTURE](docs/SCRAPING_ARCHITECTURE.md) · [API_CONTRACTS](docs/API_CONTRACTS.md) · [TESTING](docs/TESTING.md) · [DEPLOYMENT](docs/DEPLOYMENT.md) · [SECURITY](docs/SECURITY.md) · [ROADMAP](docs/ROADMAP.md)
+
+> Note: the README below describes the intended feature set. Where it disagrees with `docs/CURRENT_SYSTEM.md`, the latter is authoritative — it was written from source.
+
+---
+
 ## What It Does
 
 - **Monitors competitor websites** on a configurable schedule using Playwright
