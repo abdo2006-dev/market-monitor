@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 MAX_PAGES_DEFAULT = 5
 PAGE_DELAY_DEFAULT = 2.0
 TIMEOUT_DEFAULT = 30000  # ms
+DEFAULT_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
 GENERIC_SHOPIFY_VENDORS = {
     "bloxloot",
     "bloxshop",
@@ -138,7 +143,7 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
     base_url = competitor.get("base_url", "").rstrip("/")
     selector_config = competitor.get("selector_config", {}) or {}
     listing_urls = competitor.get("listing_urls") or []
-    headers = {"User-Agent": user_agent, "Accept": "application/json, text/html;q=0.9"}
+    headers = {"User-Agent": _shopify_user_agent(user_agent), "Accept": "application/json, text/html;q=0.9"}
     all_products = []
 
     timeout_seconds = selector_config.get("request_timeout_seconds", 30)
@@ -159,6 +164,7 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
                 base_url,
                 [{"url": f"{base_url}/products.json", "category": None}],
                 max_pages,
+                user_agent=user_agent,
             )
             if all_products:
                 return all_products
@@ -170,7 +176,7 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
         if not targets:
             targets = [{"url": f"{base_url}/products.json", "category": None}]
 
-        all_products = await _scrape_shopify_json_targets(session, base_url, targets, max_pages)
+        all_products = await _scrape_shopify_json_targets(session, base_url, targets, max_pages, user_agent=user_agent)
 
         if not all_products:
             all_products = await _scrape_custom_storefront_fallback(
@@ -183,7 +189,20 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
     return all_products
 
 
-async def _scrape_shopify_json_targets(session, base_url: str, targets: list[dict], max_pages: int) -> list[dict]:
+async def _scrape_shopify_json_targets(
+    session,
+    base_url: str,
+    targets: list[dict],
+    max_pages: int,
+    user_agent: str = DEFAULT_BROWSER_USER_AGENT,
+) -> list[dict]:
+    all_products = await _scrape_shopify_json_targets_aiohttp(session, base_url, targets, max_pages)
+    if all_products:
+        return all_products
+    return await _scrape_shopify_json_targets_httpx(base_url, targets, max_pages, user_agent=user_agent)
+
+
+async def _scrape_shopify_json_targets_aiohttp(session, base_url: str, targets: list[dict], max_pages: int) -> list[dict]:
     all_products = []
     seen_urls = set()
     for target in targets:
@@ -209,6 +228,57 @@ async def _scrape_shopify_json_targets(session, base_url: str, targets: list[dic
                     seen_urls.add(product["url"])
                     all_products.append(product)
     return all_products
+
+
+async def _scrape_shopify_json_targets_httpx(
+    base_url: str,
+    targets: list[dict],
+    max_pages: int,
+    user_agent: str = DEFAULT_BROWSER_USER_AGENT,
+) -> list[dict]:
+    import httpx
+
+    headers = {
+        "User-Agent": _shopify_user_agent(user_agent),
+        "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    all_products = []
+    seen_urls = set()
+    async with httpx.AsyncClient(headers=headers, timeout=20.0, follow_redirects=True) as client:
+        for target in targets:
+            referer = target["url"].removesuffix("/products.json")
+            for page_num in range(1, max_pages + 1):
+                url = f"{target['url']}{'&' if '?' in target['url'] else '?'}limit=250&page={page_num}"
+                try:
+                    resp = await client.get(url, headers={"Referer": referer})
+                    if resp.status_code >= 400:
+                        logger.warning("Shopify HTTPX JSON returned %s for %s", resp.status_code, url)
+                        break
+                    data = resp.json()
+                except Exception as e:
+                    logger.warning("Could not fetch Shopify HTTPX JSON %s: %s", url, e)
+                    break
+
+                products = data.get("products") or []
+                if not products:
+                    break
+
+                for raw in products:
+                    product = _extract_shopify_product(raw, base_url, target.get("category"))
+                    if product and product["url"] not in seen_urls:
+                        seen_urls.add(product["url"])
+                        all_products.append(product)
+    return all_products
+
+
+def _shopify_user_agent(user_agent: Optional[str]) -> str:
+    normalized = (user_agent or "").lower()
+    if not user_agent or "marketmonitor" in normalized or "bot" in normalized:
+        return DEFAULT_BROWSER_USER_AGENT
+    return user_agent
 
 
 async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT,

@@ -253,6 +253,12 @@ class TestShopifyScraper:
         product = _extract_shopify_product(raw, "https://petpatch.gg", None)
         assert product["category"] == "Uncategorized"
 
+    def test_shopify_user_agent_replaces_bot_like_values(self):
+        from app.services.scraper import DEFAULT_BROWSER_USER_AGENT, _shopify_user_agent
+
+        assert _shopify_user_agent("MarketMonitor/1.0 (price monitoring bot)") == DEFAULT_BROWSER_USER_AGENT
+        assert _shopify_user_agent("Mozilla/5.0") == "Mozilla/5.0"
+
     def test_expand_batch_queries_supports_url_friendly_lists(self):
         from app.api.search_dashboard_settings import _expand_batch_queries
 
