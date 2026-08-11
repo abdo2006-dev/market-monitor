@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
     RUN_SCANS_INLINE: bool = False
     CRON_SECRET: Optional[str] = None
+    # Startup schema verification (docs/adr/0002). One of: strict | warn | off.
+    # "warn" is the deliberate Phase 1A default so that removing the old
+    # create_all-at-startup behaviour cannot take a running deployment down on
+    # boot. Flip to "strict" once production has been verified and stamped.
+    DB_SCHEMA_CHECK: str = "warn"
 
     class Config:
         env_file = ".env"

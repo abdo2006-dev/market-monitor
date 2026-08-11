@@ -1,10 +1,11 @@
 name: CI
 
-# Phase 0 safety rail. This workflow runs only checks that are known to be reliable
-# at this point in the project. It deliberately does NOT run:
+# Phase 0 safety rail, extended in Phase 1A.
+# This workflow runs only checks that are known to be reliable. It deliberately
+# does NOT run:
 #   - any test that touches a live competitor storefront (see docs/TESTING.md §5)
 #   - Playwright browser automation (no browsers are installed here)
-#   - eslint (declared in package.json but not installed; see docs/TESTING.md §3)
+#   - eslint (declared in package.json but not installed)
 #
 # Add checks here as they become trustworthy, not before.
 
@@ -21,7 +22,7 @@ concurrency:
 
 jobs:
   backend:
-    name: Backend (tests, import, migrations)
+    name: Backend (tests, import, migrations, schema authority)
     runs-on: ubuntu-latest
 
     services:
@@ -43,9 +44,11 @@ jobs:
         working-directory: backend
 
     env:
-      # Matches docker-compose.yml. No secrets: this database is created and
+      # Matches docker-compose.yml. No secrets: these databases are created and
       # destroyed by the runner.
       DATABASE_URL: postgresql+asyncpg://market:market@localhost:5432/market_monitor
+      TEST_DATABASE_URL: postgresql+asyncpg://market:market@localhost:5432/market_monitor_test
+      PGPASSWORD: market
 
     steps:
       - uses: actions/checkout@v4
@@ -60,8 +63,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Unit tests
-        run: python -m pytest tests/ -q
+      - name: Create test database
+        run: |
+          psql -h localhost -U market -d postgres -c \
+            "CREATE DATABASE market_monitor_test;"
 
       - name: Application import validation
         # Catches import-time breakage, circular imports, and router registration
@@ -74,7 +79,7 @@ jobs:
           print(f'OK: {len(routes)} routes registered')
           "
 
-      - name: Alembic upgrade head
+      - name: Alembic upgrade head (fresh database)
         run: python -m alembic upgrade head
 
       - name: Alembic downgrade/upgrade round-trip
@@ -82,18 +87,44 @@ jobs:
           python -m alembic downgrade base
           python -m alembic upgrade head
 
-      - name: Alembic model/migration drift (report only)
-        # NON-BLOCKING BY DESIGN.
-        # This currently reports drift: app/database.py runs Base.metadata.create_all
-        # at startup alongside Alembic, and the two disagree on product_snapshots
-        # index names. See docs/ARCHITECTURE.md A-1 and docs/adr/0002.
-        # Promote this to a required check once ADR 0002 is implemented.
-        continue-on-error: true
+      - name: Alembic model/migration drift
+        # REQUIRED CHECK since Phase 1A.
+        # Alembic is the single schema authority (docs/adr/0002). If the models
+        # and the migrations disagree, autogenerate emits operations here and
+        # this step fails. Migration 0003 converged the two historical index
+        # naming schemes that previously made this permanently red.
         run: |
+          set -o pipefail
           python -m alembic revision --autogenerate -m ci_drift_probe 2>&1 | tee drift.log
-          rm -f alembic/versions/*ci_drift_probe*.py
-          if grep -qiE "Detected (added|removed|type|nullable)" drift.log; then
-            echo "::warning::Model/migration drift detected - expected until ADR 0002 lands"
+          probe=$(ls alembic/versions/*ci_drift_probe*.py)
+          echo "--- generated migration ---"
+          cat "$probe"
+          if grep -qE "^\s+op\.[a-z_]+\(" "$probe"; then
+            echo "::error::Model/migration drift detected. The models no longer match the migrations."
+            echo "Add a migration for the change above, or revert the model edit."
+            rm -f "$probe"
+            exit 1
+          fi
+          rm -f "$probe"
+          echo "No drift: models and migrations agree."
+
+      - name: Unit tests
+        run: python -m pytest tests/ -q -m "not critical"
+
+      - name: Daily critical path tests (Search, Export, Sync, schema)
+        # These require a database. TEST_DATABASE_URL is set above, so they run
+        # for real here rather than skipping.
+        run: python -m pytest tests/ -q -m critical
+
+      - name: Assert critical tests were not silently skipped
+        # The suite skips database-backed tests when TEST_DATABASE_URL is unset.
+        # That is correct locally and unacceptable in CI, so fail if it happens.
+        run: |
+          set -o pipefail
+          python -m pytest tests/ -q -m critical --no-header -rs 2>&1 | tee critical.log
+          if grep -q "TEST_DATABASE_URL is not set" critical.log; then
+            echo "::error::Critical database tests skipped in CI - TEST_DATABASE_URL not reaching pytest."
+            exit 1
           fi
 
   frontend:

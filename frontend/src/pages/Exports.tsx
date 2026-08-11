@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { PageHeader } from '../components/layout/Sidebar'
 import { Button, Card, ErrorState, Input, Loading, Select } from '../components/ui'
 import { collectionPricesExportUrl, getCompetitors } from '../lib/api'
+import type { Competitor } from '../lib/types'
 
 export default function ExportsPage() {
   const [competitorId, setCompetitorId] = useState('')
@@ -17,7 +18,7 @@ export default function ExportsPage() {
   })
 
   const selectedCompetitor = useMemo(
-    () => competitors.find((item: any) => String(item.id) === competitorId),
+    () => competitors.find((item: Competitor) => String(item.id) === competitorId),
     [competitors, competitorId],
   )
 
@@ -68,7 +69,7 @@ export default function ExportsPage() {
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 180px', gap: 14, marginBottom: 14 }}>
           <Select label="Competitor" value={competitorId} onChange={e => setCompetitorId(e.target.value)}>
             <option value="">Choose competitor</option>
-            {competitors.map((competitor: any) => (
+            {competitors.map((competitor: Competitor) => (
               <option key={competitor.id} value={competitor.id}>{competitor.name}</option>
             ))}
           </Select>

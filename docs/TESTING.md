@@ -1,8 +1,51 @@
 # Testing
 
+> **Phase 1A update.** Sections 1–3 below described the state at the Phase 0 baseline.
+> Phase 1A added 82 database-backed regression tests for the daily critical path, so
+> several "not covered" claims are now out of date. Current state: **§0** and
+> `docs/DAILY_CRITICAL_WORKFLOWS.md` §9. The target pyramid in §4 is unchanged and still
+> the plan.
+
 ---
 
-## 1. What exists today
+## 0. Current state (Phase 1A)
+
+**147 tests passing**: 65 pre-existing unit tests + 82 daily-critical-path tests.
+
+```bash
+docker run -d --rm --name mm_pg -e POSTGRES_USER=market -e POSTGRES_PASSWORD=market -e POSTGRES_DB=market_monitor -p 5432:5432 postgres:16-alpine
+```
+
+```bash
+docker exec mm_pg psql -U market -d postgres -c "CREATE DATABASE market_monitor_test;"
+```
+
+```bash
+cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:5432/market_monitor_test .venv/bin/python -m pytest tests/ -q
+```
+
+| Suite | Tests | Covers |
+|---|---|---|
+| `tests/test_core.py` | 65 | pure helpers (unchanged from Phase 0) |
+| `tests/critical/test_schema_authority.py` | 10 | Alembic is the sole schema authority |
+| `tests/critical/test_sync_regression.py` | 21 | reconciliation, idempotency, failure, the concurrency race |
+| `tests/critical/test_search_regression.py` | 23 | matching, grouping, best price, freshness blind spot |
+| `tests/critical/test_export_regression.py` | 28 | validation, formats, fields, fallback provenance |
+
+Harness: `tests/conftest.py`. Marker: `-m critical` / `-m "not critical"`.
+
+**Database-backed tests skip when `TEST_DATABASE_URL` is unset.** That is correct locally
+and unacceptable in CI, so CI sets it and additionally fails if a skip is detected. The
+conftest refuses to run unless the database name contains `test`, so the suite cannot
+truncate a real database.
+
+**Still missing** (unchanged): frontend tests, backend lint/type checking, E2E, and
+integration coverage for the Dashboard/Activity/notification paths. `npm run lint` remains
+broken — eslint is declared in `package.json` but not installed.
+
+---
+
+## 1. What existed at the Phase 0 baseline
 
 One file: `backend/tests/test_core.py`, 65 tests, all passing, all synchronous and pure.
 

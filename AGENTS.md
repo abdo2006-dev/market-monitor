@@ -3,9 +3,31 @@
 This file is the canonical operating manual for Claude, Codex, and any other coding agent
 working in this repository. Read it fully before making substantial changes.
 
-The project is currently in **V2 Phase 0 → Phase 1**. Phase 0 produced an audit and a
-target architecture; it deliberately did **not** rewrite the application. Read
+The project is currently in **V2 Phase 1A → Phase 1B**. Phase 0 produced an audit and a
+target architecture; Phase 1A made migrations safe and built regression coverage around the
+owner's three daily workflows. Neither rewrote the application. Read
 `docs/PROJECT_STATUS.md` first — it tells you where the work actually stands today.
+
+---
+
+## 0. Product priority — read before choosing what to work on
+
+The owner uses three workflows **every day** and makes real pricing decisions from them:
+
+1. **Market Search** (`/search`) 2. **Collection Exports** (`/exports`) 3. **Competitor
+price synchronisation**
+
+Priority order: **P0** database/migration safety · **P1** Sync reliability · **P2** Search
+reliability and freshness · **P3** Export reliability and provenance · **P4** UX for those
+three · *then* other functionality (Dashboard, Activity, Discord, Settings) · *then*
+Treasury Audit.
+
+**Do not spend effort below the line while anything above it is unreliable**, and do not
+improve unrelated features "while you are in there". Full detail:
+`docs/DAILY_CRITICAL_WORKFLOWS.md`.
+
+The governing principle: *do not optimise architecture for elegance while the daily
+workflows remain unreliable.*
 
 ---
 
@@ -15,12 +37,15 @@ In this order:
 
 1. `docs/PROJECT_STATUS.md` — current phase, branch, baseline, blockers, next task.
 2. `AGENTS.md` (this file) — the rules.
-3. `docs/ARCHITECTURE.md` — the V2 target architecture and its layer boundaries.
-4. `docs/CURRENT_SYSTEM.md` — what actually exists today, with file references.
-5. Any ADR in `docs/adr/` relevant to what you are touching.
+3. `docs/DAILY_CRITICAL_WORKFLOWS.md` — the three workflows, their failure modes, and their
+   regression coverage.
+4. `docs/ARCHITECTURE.md` — the V2 target architecture and its layer boundaries.
+5. `docs/CURRENT_SYSTEM.md` — what actually exists today, with file references.
+6. Any ADR in `docs/adr/` relevant to what you are touching.
 
 For scraping work also read `docs/SCRAPING_ARCHITECTURE.md`.
 For anything that crosses the HTTP boundary also read `docs/API_CONTRACTS.md`.
+Before any schema or migration work, read `docs/RUNBOOK.md` §2.2.
 
 Do not skip this because a task "looks small". Several behaviours in this codebase are
 implemented in more than one place (see §4), and a small change in the wrong copy
@@ -90,14 +115,21 @@ introduce a silent bug here.
 
 ## 5. Database rules
 
+- **Alembic is the single schema authority.** As of Phase 1A the application never creates
+  or alters schema at runtime — startup only *verifies*. Do not reintroduce
+  `create_all`, `drop_all`, or ad-hoc DDL; `test_application_startup_never_creates_schema`
+  will fail if you do (it parses the AST, so prose mentioning `create_all` is fine).
 - **Schema changes require an Alembic migration.** No exceptions.
-- **Do not add DDL to application startup.** `backend/app/database.py:53` currently runs
-  `Base.metadata.create_all` plus two raw `ALTER TABLE` statements on boot. This is a
-  known defect (see `docs/adr/0002-postgres-source-of-truth.md`); do not extend it, and do
-  not copy the pattern.
-- After changing a model, run an autogenerate diff against a migrated database and
-  confirm the only differences are the ones you intended.
+- After changing a model, run autogenerate against a migrated database and confirm the diff
+  is empty or exactly what you intended. **The CI drift check is a required gate** — a
+  model/migration disagreement fails the build.
 - Migrations must be reversible where practical; write a real `downgrade()`.
+- **Never `alembic stamp` a database without classifying it first.** Run
+  `backend/scripts/check_schema_state.py` (read-only) and follow `docs/RUNBOOK.md` §2.2.
+  Stamping a Case C (genuinely drifted) database tells Alembic a lie that every later
+  migration inherits. Take a backup before anything that writes.
+- **Do not run destructive production migrations automatically.** The manual workflow
+  `.github/workflows/db-migrate.yml` is the supported path; it defaults to read-only.
 - PostgreSQL is the durable source of truth. Redis is a broker and a cache, never the
   system of record.
 
@@ -126,15 +158,23 @@ introduce a silent bug here.
   integration test.
 - Scraper tests must use committed fixtures or mocks. **Never** put a request to a live
   competitor storefront in the test suite or in CI.
+- **Characterisation tests are not aspirational.** Several tests in `tests/critical/`
+  deliberately assert *current, defective* behaviour so that fixing it is a visible change
+  — for example `test_concurrent_scans_of_one_competitor_are_not_prevented` asserts that
+  duplicate products ARE created. When you fix the defect, **invert the assertion and
+  update the docs**; do not delete the test.
 - Run the relevant checks before you report completion:
 
 ```bash
-cd backend && .venv/bin/python -m pytest tests/ -q
+cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:5432/market_monitor_test .venv/bin/python -m pytest tests/ -q
 ```
 
 ```bash
 cd frontend && npx tsc --noEmit && npm run build
 ```
+
+- Database-backed tests **skip** without `TEST_DATABASE_URL`. A run reporting only 65 tests
+  means the critical suite did not execute — that is not a pass.
 
 - If a check cannot be run in your environment (for example anything needing PostgreSQL
   or Redis), say so explicitly in your report. Do not describe an unrun check as passing.

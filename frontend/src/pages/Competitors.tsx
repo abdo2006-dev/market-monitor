@@ -5,11 +5,12 @@ import { Card, Button, Table, Tr, Td, Loading, EmptyState, ErrorState } from '..
 import { PageHeader } from '../components/layout/Sidebar'
 import { timeAgo } from '../lib/utils'
 import CompetitorForm from '../components/CompetitorForm'
+import type { Competitor, CompetitorInput } from '../lib/types'
 
 export default function CompetitorsPage() {
   const qc = useQueryClient()
   const [modalOpen, setModalOpen] = useState(false)
-  const [editing, setEditing] = useState<any>(null)
+  const [editing, setEditing] = useState<Competitor | null>(null)
   const [scanningId, setScanningId] = useState<number | null>(null)
 
   const { data: competitors = [], isLoading, error } = useQuery({
@@ -21,7 +22,7 @@ export default function CompetitorsPage() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['competitors'] }); setModalOpen(false) },
   })
   const updateMut = useMutation({
-    mutationFn: ({ id, data }: any) => updateCompetitor(id, data),
+    mutationFn: ({ id, data }: { id: number; data: Partial<CompetitorInput> }) => updateCompetitor(id, data),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['competitors'] }); setEditing(null) },
   })
   const deleteMut = useMutation({
@@ -42,14 +43,14 @@ export default function CompetitorsPage() {
     try { await scanNow(id) } finally { setScanningId(null) }
   }
 
-  const handleToggleActive = (competitor: any) => {
+  const handleToggleActive = (competitor: Competitor) => {
     updateMut.mutate({ id: competitor.id, data: { active: !competitor.active } })
   }
 
   if (isLoading) return <div style={{ padding: '2rem' }}><Loading /></div>
   if (error) return <div style={{ padding: '2rem' }}><ErrorState message="Failed to load competitors." /></div>
 
-  const activeCompetitors = competitors.filter((competitor: any) => competitor.active)
+  const activeCompetitors = competitors.filter(competitor => competitor.active)
   const scanControlsDisabled = scanAllMut.isPending || scanningId !== null
 
   return (
@@ -95,7 +96,7 @@ export default function CompetitorsPage() {
           </div>
         ) : (
           <Table headers={['Name', 'Category', 'Status', 'Frequency', 'Last Scan', 'Products', 'Actions']}>
-            {competitors.map((c: any) => (
+            {competitors.map((c: Competitor) => (
               <Tr key={c.id}>
                 <Td>
                   <div style={{ fontWeight: 600, color: '#e4e4f0' }}>{c.name}</div>
@@ -161,7 +162,7 @@ export default function CompetitorsPage() {
         open={!!editing}
         onClose={() => setEditing(null)}
         initial={editing}
-        onSubmit={data => updateMut.mutate({ id: editing.id, data })}
+        onSubmit={data => { if (editing) updateMut.mutate({ id: editing.id, data }) }}
         loading={updateMut.isPending}
       />
     </div>

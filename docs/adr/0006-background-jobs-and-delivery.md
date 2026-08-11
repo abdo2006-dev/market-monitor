@@ -109,38 +109,108 @@ denied.
 
 ## Decision — part 2: execution topology (OPEN)
 
-**This is not decided.** Recording the options so the next phase does not re-derive them.
+**Still not decided as of Phase 1A.** Phase 1A added the evidence-gathering tool
+(`backend/scripts/benchmark_scan.py`) but the owner has not yet run it against their real
+competitors, so the numbers that settle this do not exist. See §"Missing evidence" below.
 
-**Option A — commit to a worker host** (Compose on a VPS, Fly.io, Render, Railway).
-*For:* real Celery worker and beat; Playwright works; long scrapes fit; migrations run on
-deploy; the outbox worker has a natural home; matches what the code already assumes.
-*Against:* a running server to maintain and pay for; more operational surface than the
-current serverless setup.
+### 2.1 Separate the three workloads
 
-**Option B — commit to serverless** (stay on Vercel).
-*For:* zero idle cost; already deployed and working for the JSON scrapers; no server to
-maintain. *Against:* no Playwright, so generic-selector competitors are permanently
-unscrapeable; all work must fit 300 seconds; the queue must be drained inline by the cron
-in resumable chunks; the outbox needs a cron-driven drain; migrations remain a manual step.
+They do **not** need the same execution topology, and treating them as one problem is why
+the decision has been hard:
 
-**Option C — hybrid**: serverless API and UI, plus one small worker process elsewhere.
-*For:* keeps the fast frontend deploy while restoring real background execution.
-*Against:* two deployment targets, two sets of environment variables, two places to look
-when something breaks.
+| Workload | Trigger | Latency need | Duration | Can it be queued? |
+|---|---|---|---|---|
+| **Interactive Sync** ("Scan" button) | human, on demand | user is watching; needs feedback in seconds | one competitor | yes — if the UI polls |
+| **Scheduled Sync** ("scan all", nightly) | cron / beat | nobody watching | all competitors, serial cost | yes, and should be |
+| **Live Export** | human, on demand | user is waiting for a file download | one collection | **no** — the response *is* the file |
 
-### Why this must be decided before Phase 1 scan work
+Live Export is the constraint that rules out a pure queue-everything design: the browser
+navigates to the URL and expects bytes back. It must stay synchronous (or become a
+two-step "prepare then download", which is a UX change, not just a topology one).
+
+### 2.2 Decision matrix
+
+Scoring is against this application's actual needs: one operator, daily use, reliability
+over elegance, no paid infrastructure requested.
+
+| Criterion | A — persistent worker | B — serverless only (today) | C — hybrid (serverless + free runner) |
+|---|---|---|---|
+| Queued scans actually run | ✅ yes | ❌ **no consumer; silently dropped** | ✅ yes |
+| Playwright / browser strategies | ✅ works | ❌ impossible (no Chromium in bundle) | ✅ works on the runner |
+| Long scrapes | ✅ 600 s soft limit, tunable | ❌ hard 300 s per request | ✅ on the runner |
+| Scheduled sync granularity | ✅ per-competitor cadence, 60 s tick | ⚠️ one cron/day (Vercel Hobby) | ⚠️ depends on runner (GH Actions ~5 min floor) |
+| Migrations on deploy | ✅ natural | ❌ manual (Phase 1A adds a manual workflow) | ⚠️ runner can own it |
+| Outbox drain (ADR 0006 part 1) | ✅ continuous loop | ⚠️ cron-driven, adds latency | ✅ continuous on runner |
+| Interactive Sync feedback | ✅ enqueue + poll | ⚠️ inline only, bounded by 300 s | ✅ enqueue + poll |
+| Live Export | ✅ fine | ⚠️ fine today, 300 s ceiling | ✅ fine (stays on serverless) |
+| Failure recovery | ✅ retry, ack-late, reaper | ❌ a timeout loses the tail with no record | ✅ retry on runner |
+| Operational complexity | ⚠️ one server to keep alive | ✅ lowest | ❌ **highest** — two targets, two env sets |
+| Cost | ❌ ~$5–7/mo realistically | ✅ free | ✅ free-ish |
+| Observability | ✅ one place | ⚠️ per-invocation logs | ❌ split across two |
+| Failure is *visible* | ✅ | ❌ **worst property: silent** | ✅ |
+
+**Free-tier realities, honestly stated:** Render and Fly.io free tiers sleep or have been
+withdrawn for always-on workers; Railway's free allowance is trial-only. A genuinely free
+persistent worker is not reliably available in 2026. Option C's "free compute" is usually
+GitHub Actions on a schedule — which is real and workable, but its cron is best-effort
+(delays of 5–30 minutes under load are normal), it is not designed as a job runner, and
+long-running scheduled Actions on private repos consume included minutes.
+
+### 2.3 Recommendation
+
+**Option A, with Live Export staying synchronous.**
+
+Reasoning, in priority order:
+
+1. **The current topology fails silently.** Option B's defining property is that a queued
+   scan returns a `task_id` and never runs. For an application whose entire value is
+   "is my price data current?", a failure mode that looks like success is the worst
+   possible one. Everything else in this matrix is secondary to that.
+2. **Every capability the code already assumes exists in A for free** — Celery, beat,
+   Playwright, migrations on deploy, a continuous outbox drain. Option B requires building
+   a chunked, resumable, cron-driven queue drain that A does not need at all.
+3. **Reliability is the stated Phase 1 objective**: "make Sync reliable enough that Search
+   can be trusted every morning." Option B cannot deliver that for browser-based
+   competitors at any amount of engineering effort, because there is no browser.
+4. Cost is roughly $5–7/month. The instruction was not to choose something *solely*
+   because it is free; this is the case where paying a small amount buys the property that
+   matters most.
+
+Option C is the fallback if paid hosting is genuinely unacceptable. It gets most of A's
+reliability at zero marginal cost, at the price of two deployment targets and the worst
+observability story of the three. If C is chosen, the runner should own scheduled sync and
+the outbox drain, while interactive Sync and Live Export stay on serverless.
+
+Option B should be rejected regardless of cost preference, unless the owner accepts
+permanently abandoning browser-based competitors and one-scan-per-day granularity.
+
+### 2.4 Missing evidence — what would change this
+
+The recommendation above is based on capability, not on measured load. Run:
+
+```bash
+cd backend && .venv/bin/python scripts/benchmark_scan.py --json /tmp/bench.json
+```
+
+Then reconsider if:
+
+- **Sum of durations is comfortably under ~200 s** and **no competitor needs a browser** —
+  Option B becomes genuinely viable for scheduled sync, and the only remaining objection is
+  once-daily granularity.
+- **Any competitor exceeds ~120 s alone** — Option B is dead even for a single interactive
+  scan, because a serial scan-all cannot fit 300 s.
+- **Any competitor requires Playwright** — Option B is already dead for that competitor.
+
+Record the measured numbers in `docs/DAILY_CRITICAL_WORKFLOWS.md` §6 and update this ADR to
+`Accepted` with the chosen option.
+
+### Why this must be decided before the Phase 1B scan migration
 
 ADR 0003 specifies "create a durable run, then enqueue" as the universal pathway, with the
 *runner* as a deployment concern. That design holds under all three options — but the
 runner implementation differs substantially. Building the chunked, resumable inline drain
 that Option B requires is significant work that Option A does not need at all. Choosing
 after the fact means building the wrong one.
-
-**Recommendation:** Option A. Every capability the application already assumes — Celery,
-beat, Playwright, migrations on deploy, a long-running outbox drain — exists there for
-free, and the current Vercel deployment is silently dropping queued scans today. But this
-is a cost and preference decision for the project owner, not a technical conclusion, and it
-is recorded here as open rather than assumed.
 
 ## Status summary
 

@@ -215,7 +215,7 @@ see `docs/PROJECT_STATUS.md`.
 `scanAllCompetitors` (`api.ts:14-56`) moves to the backend as `ScanAllCompetitors`. The
 frontend gets `requestBulkScan()` returning run ids, and polls. See ARCHITECTURE A-3.
 
-### 4.7 Organize the frontend by feature
+### 4.7 Organize the frontend by feature (unchanged)
 
 Current layout is by technical kind (`pages/`, `components/`, `lib/`). Target:
 
@@ -234,3 +234,103 @@ src/
 This is a mechanical move and should happen **after** contract typing, not before — moving
 untyped files first makes the typing diff unreadable. The UI itself is not being
 redesigned in Phase 1.
+
+---
+
+## 5. Phase 1A status and the generation plan
+
+### 5.1 What Phase 1A did
+
+**Investigated OpenAPI-generated TypeScript and deliberately deferred it.**
+
+The blocking reason: **every Search endpoint, the Export endpoint, and `scan-now` declare
+no `response_model`** (§1). FastAPI therefore emits them in `openapi.json` as untyped
+objects. Running `openapi-typescript` today would generate `unknown` for exactly the
+endpoints the daily workflows depend on — real machinery, no benefit, plus a new
+dependency and a new CI step to maintain.
+
+Instead, Phase 1A added **hand-written types for the critical path only**, in
+`frontend/src/lib/types.ts`, each shape verified against the backend contract tests in
+`backend/tests/critical/`. The file carries a header saying it is temporary and names its
+replacement.
+
+Typed in `frontend/src/lib/api.ts`: `getCompetitors`, `createCompetitor`,
+`updateCompetitor`, `seedDefaultCompetitors`, `scanNow`, `scanAllCompetitors`,
+`getSearchSuggestions`, `compareProduct`, `batchCompareSummary`,
+`collectionPricesExportUrl`.
+
+Still `any` (deliberately out of scope — not on the critical path): `getProducts`,
+`getProduct`, `getProductHistory`, `getEvents`, `searchProducts`, `getDashboardSummary`,
+`getSalesTrends`, `getSettings`, `updateSettings`.
+
+`any` eliminated entirely from `MarketSearch.tsx`, `Exports.tsx`, and `Competitors.tsx`.
+
+### 5.2 Contract bug found by typing
+
+`ScanAllItem.status` mixes two vocabularies. The client-side fan-out assigns
+`queued | completed | failed | skipped`, but `api.ts:55` passes through
+`result.result?.status` when present — a `ScanResult` status, `success | failed`. A
+successful inline scan therefore yields the literal `'success'`, which no consumer checks
+for.
+
+It works by accident: `Competitors.tsx` counts `failed` and `queued` explicitly and derives
+`completed` by subtraction, so `'success'` lands in the right bucket. Typed accurately
+rather than fixed, because ADR 0003 replaces the whole client-side fan-out.
+
+Two latent null-dereferences were also surfaced and fixed: `selected` in
+`MarketSearch.tsx:25` and `editing` in `Competitors.tsx:165`. Both were runtime-guarded by
+a sibling prop (`enabled`, `open`) but unguarded in the callback itself.
+
+### 5.3 Exact plan for Phase 1B/1C
+
+Ordered. Each step is a prerequisite for the next.
+
+**Step 1 — Snapshot the current responses (safety net).**
+Before adding any `response_model`, capture the exact JSON each critical endpoint returns
+today, as committed fixtures. `backend/tests/critical/` already asserts the field-level
+shapes; extend to full-payload snapshots for `/search/suggestions`, `/search/compare`,
+`/search/batch-compare-summary`, and `scan-now`.
+
+*Why this matters:* `response_model` **filters** the response. A model that omits a field
+silently drops it, and neither the compiler nor a smoke test would notice. The snapshot is
+what makes step 2 safe, and it is why step 2 was not attempted in Phase 1A.
+
+**Step 2 — Declare `response_model` on the critical-path routes.**
+Model the shapes that already exist; change nothing. Assert each response is byte-identical
+to its snapshot. Order: `scan-now` (smallest), `/search/suggestions`, `/search/compare`,
+`/search/batch-compare-summary`, exports envelope.
+
+Note `/search/compare` returns `Decimal` via `ProductOut.model_dump()` while `sales-trends`
+and `batch-compare-summary` cast to `float`. Modelling will expose this; keep the existing
+serialisation, do not "fix" it silently.
+
+**Step 3 — Add `openapi-typescript` (dev dependency).**
+
+```
+npm i -D openapi-typescript
+```
+
+**Step 4 — Generate and commit.**
+
+```
+python -c "import json,app.main; print(json.dumps(app.main.app.openapi()))" > openapi.json
+npx openapi-typescript openapi.json -o src/lib/api-types.ts
+```
+
+Commit `api-types.ts` so its diffs are reviewable.
+
+**Step 5 — Replace `types.ts` with generated types.**
+Delete the hand-written shapes as their generated equivalents land. Keep hand-written types
+only for things the backend genuinely cannot express — for example the `ScanNowResponse`
+union, until ADR 0003 collapses it.
+
+**Step 6 — Fail CI on drift.**
+
+```
+dump openapi.json → regenerate api-types.ts → git diff --exit-code → tsc --noEmit
+```
+
+A stale committed type file or a frontend that no longer matches the contract breaks the
+build instead of a page.
+
+**Step 7 — Extend to the remaining 14 routes**, lowest risk last.

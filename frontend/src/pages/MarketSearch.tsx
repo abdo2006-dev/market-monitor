@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { compareProduct, getSearchSuggestions } from '../lib/api'
+import type { CompareRow, SearchSuggestion } from '../lib/types'
 import { Card, Input, Button, Table, Tr, Td, StockBadge, Loading, EmptyState } from '../components/ui'
 import { PageHeader } from '../components/layout/Sidebar'
 import { formatPrice, timeAgo } from '../lib/utils'
@@ -11,7 +12,7 @@ export default function MarketSearchPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [inputVal, setInputVal] = useState(searchParams.get('q') || '')
   const [query, setQuery] = useState(searchParams.get('q') || '')
-  const [selected, setSelected] = useState<any>(null)
+  const [selected, setSelected] = useState<SearchSuggestion | null>(null)
 
   const suggestionsQuery = useQuery({
     queryKey: ['search-suggestions', query],
@@ -21,7 +22,10 @@ export default function MarketSearchPage() {
 
   const comparisonQuery = useQuery({
     queryKey: ['compare-product', selected?.representative_product_id],
-    queryFn: () => compareProduct({ product_id: selected.representative_product_id }),
+    // `enabled` already prevents this running while `selected` is null; the
+    // non-null assertion makes that guarantee visible to the compiler rather
+    // than relying on it implicitly.
+    queryFn: () => compareProduct({ product_id: selected!.representative_product_id }),
     enabled: !!selected,
   })
 
@@ -35,7 +39,7 @@ export default function MarketSearchPage() {
   const suggestions = suggestionsQuery.data?.items || []
   const comparison = comparisonQuery.data
   const rows = comparison?.items || []
-  const foundRows = rows.filter((row: any) => row.product)
+  const foundRows = rows.filter(row => row.product)
 
   return (
     <div style={{ padding: '2rem' }}>
@@ -84,7 +88,7 @@ export default function MarketSearchPage() {
         ) : (
           <Card>
             <Table headers={['Item', 'Seen On', 'Best Price', 'Category', 'Match']}>
-              {suggestions.map((item: any) => (
+              {suggestions.map((item: SearchSuggestion) => (
                 <Tr key={item.normalized_title} onClick={() => setSelected(item)}>
                   <Td>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -130,7 +134,7 @@ export default function MarketSearchPage() {
             </div>
 
             <Table headers={['Competitor', 'Matched Item', 'Category', 'Price', 'Stock', 'Last Checked', '']}>
-              {rows.map((row: any) => {
+              {rows.map((row: CompareRow) => {
                 const p = row.product
                 return (
                   <Tr key={row.competitor_id} onClick={() => p && navigate(`/products/${p.id}`)}>

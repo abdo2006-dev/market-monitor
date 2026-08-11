@@ -68,39 +68,104 @@ simply run `upgrade head`, it will fail.
 cd backend && .venv/bin/python -m alembic upgrade head
 ```
 
-### 2.2 Recovering a database that was built by `create_all`
+### 2.2 Classifying and repairing a database (Cases A / B / C / D)
 
-This is the expected state of the Vercel-deployed database (`docs/ARCHITECTURE.md` A-1).
+Since Phase 1A the application no longer creates schema at startup. Alembic is the sole
+authority (`docs/adr/0002`). Before touching any database, **classify it**. Never stamp
+blindly.
 
-1. Confirm the diagnosis:
-
-```bash
-psql "$DATABASE_URL" -c "SELECT count(*) FROM information_schema.tables WHERE table_name='alembic_version';"
-```
-
-`0` means unstamped.
-
-2. Compare the live schema against `0002_product_category`. Both migrations are already
-   reflected in the ORM models, so if the tables and columns are present, the database is
-   logically at head — only the stamp is missing.
-
-3. Stamp it, **without running any DDL**:
+#### Step 1 — Inspect (read-only, always safe)
 
 ```bash
-cd backend && .venv/bin/python -m alembic stamp 0002_product_category
+cd backend && DATABASE_URL="<target>" .venv/bin/python scripts/check_schema_state.py
 ```
 
-4. Verify:
+This script only reads catalog metadata. It emits a case and an exit code:
+
+| Case | Exit | Meaning | Action |
+|---|---|---|---|
+| **A** | 0 | Managed by Alembic, at head | Nothing to do |
+| **A-** | 10 | Managed by Alembic, behind head | `alembic upgrade head` |
+| **B** | 20 | Schema structurally matches the models, but no `alembic_version` stamp | Backup, then stamp — Step 3 |
+| **C** | 30 | **Real drift**: tables or columns missing/unexpected | **Do NOT stamp** — Step 4 |
+| **D** | 40 | Empty database | `alembic upgrade head` |
+
+#### Step 2 — Back up before anything that writes
+
+Non-negotiable for Cases B and C.
 
 ```bash
-cd backend && .venv/bin/python -m alembic current
+pg_dump "$DATABASE_URL" > backup-$(date +%F-%H%M).sql
 ```
 
-5. Expect index names to differ from a freshly-migrated database
-   (`ix_product_snapshots_*` instead of `ix_snapshots_*`). Do not rename them ad hoc — a
-   future migration must handle both spellings with `IF EXISTS`.
+Store it outside the repository. Never commit a dump.
 
-**Take a backup before stamping.** Stamping the wrong revision silently skips migrations.
+#### Step 3 — Case B: structurally correct but unstamped
+
+This is the expected state of a database created by a pre-Phase-1A build, where startup
+ran `create_all`. The schema is right; only the bookkeeping row is missing.
+
+The inspector has already confirmed that every table and column the models declare is
+present. Re-read its output and confirm `missing tables` and `missing columns` are both
+empty before continuing.
+
+```bash
+cd backend && DATABASE_URL="<target>" .venv/bin/python -m alembic stamp head
+```
+
+`stamp` writes one row to `alembic_version`. **It runs no DDL** and cannot alter your data.
+
+Verify:
+
+```bash
+cd backend && DATABASE_URL="<target>" .venv/bin/python scripts/check_schema_state.py
+```
+
+Expect Case A.
+
+Note on index names: a `create_all`-built database already uses the model naming
+(`ix_product_snapshots_*`). Migration `0003_reconcile_index_names` converges the two
+historical schemes and is written to be a no-op on a database that is already correct, so
+stamping past it is safe.
+
+#### Step 4 — Case C: real drift. Stop.
+
+The database has tables or columns the models do not expect, or is missing ones they
+require. **Stamping would tell Alembic a lie** and every future migration would be applied
+to a schema it does not describe.
+
+1. Do not stamp. Do not run `upgrade head`.
+2. Re-run the inspector with `--json` and keep the output.
+
+```bash
+cd backend && DATABASE_URL="<target>" .venv/bin/python scripts/check_schema_state.py --json > drift.json
+```
+
+3. Decide, per difference, whether the database or the models are correct.
+4. Reconcile by hand with explicit SQL, or write a migration that brings the database to
+   the expected shape, then stamp the revision *before* that migration and upgrade.
+5. Only once the inspector reports Case B or A may you continue.
+
+If the drift is small and the data is expendable, restoring from backup into a freshly
+migrated database is often faster and safer than hand-reconciliation.
+
+#### Applying migrations to production
+
+Vercel runs no migration step (`docs/DEPLOYMENT.md` §2). Two supported routes:
+
+**Manual, from a trusted machine:**
+
+```bash
+cd backend && DATABASE_URL="<production>" .venv/bin/python -m alembic upgrade head
+```
+
+**Via the manual GitHub Actions workflow** (`.github/workflows/db-migrate.yml`):
+Actions → "Database migration (manual)" → Run workflow. It defaults to `inspect`
+(read-only). Write actions require selecting `upgrade` or `stamp-head` **and** typing
+`MIGRATE` in the confirmation field. `stamp-head` refuses to run unless the inspector
+reports Case B. It never runs on push, on a schedule, or on deploy.
+
+Requires the `PRODUCTION_DATABASE_URL` repository secret.
 
 ### Create a new migration
 

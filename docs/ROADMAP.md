@@ -1,10 +1,30 @@
 # Roadmap
 
-Dependency-aware sequence from the Phase 0 audit. Each step is narrowly scoped and
-independently shippable. **Do not batch steps** — the scan pathway is the highest-risk code
-in the repository and large simultaneous changes there are not reviewable.
+Dependency-aware sequence. Each step is narrowly scoped and independently shippable.
+**Do not batch steps** — the scan pathway is the highest-risk code in the repository and
+large simultaneous changes there are not reviewable.
 
-Current position: **Phase 0 complete. Phase 1 not started.** See `docs/PROJECT_STATUS.md`.
+Current position: **Phase 1A complete. Phase 1B not started.** See `docs/PROJECT_STATUS.md`.
+
+---
+
+## Priority order
+
+Reset in Phase 1A after the owner identified their daily workflows. Everything above the
+line protects Search, Exports, and Sync — the three surfaces used every day to make real
+pricing decisions (`docs/DAILY_CRITICAL_WORKFLOWS.md`).
+
+| | Priority | Rationale |
+|---|---|---|
+| **P0** | Database / migration safety | Nothing else is safe to change until schema changes are safe. |
+| **P1** | **Sync reliability** | Search and Export are only as trustworthy as the data Sync writes. |
+| **P2** | Search reliability and freshness | Where pricing decisions actually get made. |
+| **P3** | Export reliability and provenance | Stale data must never masquerade as live. |
+| **P4** | Polished UX for Sync / Search / Export | Only once the data underneath is trustworthy. |
+| — | Other Market Monitor functionality | Dashboard, Activity, Discord, Settings. |
+| — | Treasury Audit | Design only. Blocked on P0–P3 and on unresolved legal questions. |
+
+Do not spend effort below the line while anything above it is unreliable.
 
 ---
 
@@ -14,127 +34,140 @@ Baseline archived, health measured, system reverse-engineered, 13 risks confirme
 source references, V2 target designed, documentation suite written, minimal CI added.
 One-line application change (`tsconfig.json` lib), verified byte-identical build output.
 
+## Phase 1A — Daily critical path foundation ✅ complete
+
+**P0 done.** Alembic is now the single schema authority: startup DDL removed, migration
+`0003` converges the two historical index-naming schemes, a read-only Case A/B/C/D
+diagnostic added, a manual-only production migration workflow added, and the CI drift
+check promoted from `continue-on-error` to a required gate. Also fixed: `alembic revision`
+had never worked (`alembic/script.py.mako` was missing from the repo).
+
+**Regression coverage established.** 82 new tests across Sync (21), Search (23), Export
+(28) and schema authority (10), against a real PostgreSQL database with deterministic
+fixtures and no live network. 147 tests total.
+
+**Characterised, not changed:** the concurrent-scan duplicate-product race (reproduced
+deterministically), the export saved-data fallback, dead price-change thresholds, and the
+Search freshness blind spot.
+
+**Measured/documented:** freshness model (Part D), benchmark utility (Part E), topology
+decision matrix (Part F), acquisition boundary sketch (Part G), critical-path TypeScript
+contracts (Part H).
+
 ---
 
-## Phase 1 — Foundations
+## Phase 1B — Make Sync reliable (P1)
 
-Ordered by dependency. Steps 1.1–1.3 are independent of the topology decision; **1.4
-onward requires it** (`docs/adr/0006` part 2 is deliberately Open).
+**Objective: make competitor price synchronisation reliable enough that Search can be
+trusted every morning.** Everything in this phase serves that sentence.
 
-### 1.1 — Single schema owner (ADR 0002) · **do this first**
+### 1B.0 — Run the benchmark and settle the topology · **blocking, not a coding task**
 
-*Why first:* the only Critical item that is small, self-contained, and blocks nothing —
-and every later migration is unsafe until it is done.
+```bash
+cd backend && .venv/bin/python scripts/benchmark_scan.py --json /tmp/bench.json
+```
 
-1. Inspect production for `alembic_version`; back up; `alembic stamp` if unstamped
-   (`docs/RUNBOOK.md` §2.2).
-2. Remove `create_all` + raw `ALTER TABLE` from `database.py:53-59`.
-3. Add a migration step to the Vercel deploy process (currently none).
-4. Promote the CI drift check from `continue-on-error` to required.
+Record the numbers in `docs/DAILY_CRITICAL_WORKFLOWS.md` §6, then choose Option A, B, or C
+and update `docs/adr/0006` to Accepted. Phase 1A recommends **Option A (persistent
+worker)**, primarily because Option B's failure mode is silent.
 
-*Risk:* Medium — the stamping step is irreversible if done wrong. Back up first.
-*Verify:* CI drift check green; a fresh database boots only after migrations run.
+**Nothing in 1B.2–1B.5 should start before this is settled** — the runner implementation
+differs substantially between options.
 
-### 1.2 — Contract typing, backend half (ADR 0005 steps 2)
+### 1B.1 — Stop duplicate products (Y1 + Y2) · *can start immediately*
 
-Declare `response_model` on the 14 routes that lack one. Model shapes that already exist;
-change nothing. Verify each by capturing the current JSON, adding the model, asserting the
-response is unchanged.
+The highest-value correctness fix available, and independent of topology.
 
-*Risk:* Low, additive. *Independent of everything else — can run in parallel.*
+1. Audit existing duplicates and report before constraining.
+2. Data-cleanup migration merging duplicate `(competitor_id, url)` rows, preserving
+   snapshot history from both.
+3. Add `UNIQUE (competitor_id, url)` and a partial unique on `external_id`.
+4. Add a PostgreSQL advisory lock around scan entry.
+5. Invert the assertion in `test_concurrent_scans_of_one_competitor_are_not_prevented`.
 
-### 1.3 — Contract typing, frontend half (ADR 0005 steps 3–5)
+*Why it matters:* duplicates cause false `product_removed` events, which `sales-trends`
+counts as phantom sales.
 
-Add `openapi-typescript` (dev-only), generate `api-types.ts`, commit it, type all 20
-functions in `lib/api.ts`, add the drift check to CI.
+### 1B.2 — Durable scan lifecycle (ADR 0003)
 
-*Depends on:* 1.2. *Risk:* Low.
-
-### 1.4 — Decide deployment topology (ADR 0006 part 2) · **blocking**
-
-Not a coding task. Choose Option A (worker host), B (serverless), or C (hybrid).
-Phase 0 recommends A. Record the outcome by updating ADR 0006 to Accepted.
-
-**Nothing in 1.5–1.8 should start before this is settled.**
-
-### 1.5 — Scraper adapters (ADR 0004)
-
-1. **Capture fixtures from the current implementation first.** Prerequisite — without them
-   the refactor is unverifiable.
-2. Define `ProductObservation`, `ScrapeContext`, `ScrapeResult`, the protocol.
-3. Extract `ShopifyAdapter`, keeping `scrape_competitor`'s signature as a shim.
-4. Assert output matches the captured fixtures exactly.
-5. Repeat for Salla, then Playwright.
-6. Add the shared contract suite and Shopify fallback-ordering tests.
-
-*Risk:* Medium. Highest-value step for future safety: after this, a Shopify fix cannot
-silently break Salla or generic scraping.
-
-### 1.6 — Durable scan lifecycle (ADR 0003)
-
-Migrations: `scrape_runs.trigger`, status enum, partial unique index on non-terminal runs,
-`events.scrape_run_id`. Then `RequestCompetitorScan` + `ProcessCompetitorScan`, advisory
-locking, the state machine, and a reaper for abandoned runs.
-
-Collapse all five pathways onto them. Remove the private-worker imports from
+`scrape_runs.trigger`, real status enum with non-terminal states, partial unique index,
+`events.scrape_run_id`, `RequestCompetitorScan` / `ProcessCompetitorScan`, a reaper for
+abandoned runs. Collapse all five pathways. Remove the private-worker imports from
 `api/competitors.py` and `api/cron.py`.
 
-*Depends on:* 1.1, 1.4, and ideally 1.5. *Risk:* **High** — this is the core change.
-*User-visible:* "Scan" becomes asynchronous and returns a run id to poll.
+### 1B.3 — Scoped, reliable notifications (ADR 0006 part 1)
 
-### 1.7 — Transactional outbox (ADR 0006 part 1)
+Transactional outbox. Fixes duplicate sends, dropped 429s, and `scrape_failed` events that
+are never marked notified (Y5).
 
-`outbox_entries` table; write events + outbox in the same transaction as products; a
-`DeliverNotifications` worker claiming with `FOR UPDATE SKIP LOCKED`; real backoff;
-dead-lettering; 429 handled as a retry rather than a drop. Move `notification_sent` off
-`Event`.
+### 1B.4 — Honour the detection policy (Y3, Y4)
 
-*Depends on:* 1.6 (needs `scrape_run_id`). *Risk:* Medium.
-*Fixes:* duplicate notifications, dropped notifications, and failure alerts bypassing the
-global enable switch.
+Make `MIN_PRICE_CHANGE_AMOUNT` / `_PERCENTAGE` / `IGNORE_KEYWORDS` real, and stop treating
+`in_stock → unknown` as a stock-out. Either wire `app_settings` into the policy or delete
+the inert Settings page.
 
-### 1.8 — Move scan orchestration out of React (ADR 0003 / 0005 step 6)
+### 1B.5 — Move scan orchestration out of React
 
 Delete `scanAllCompetitors` from `lib/api.ts`; add a bulk endpoint; poll run status.
 
-*Depends on:* 1.6. *Risk:* Low.
-
-### 1.9 — Test foundations (`docs/TESTING.md`)
-
-Database integration harness on a real PostgreSQL container; `reconcile()` unit tests; API
-tests with contract snapshots; use-case tests. Migration checks are already in CI from 1.1.
-
-*Interleave with 1.5–1.8 rather than doing it last* — each step should land with its tests.
-
 ---
 
-## Phase 2 — Correctness and honesty
+## Phase 1C — Search freshness (P2)
 
-Things that are currently broken or misleading rather than structurally wrong.
+Surface freshness in Search using the model in `docs/DAILY_CRITICAL_WORKFLOWS.md` §5.
+Start with **absolute age** ("checked 3 hours ago") — do not invent a "stale" threshold
+until 1B.0 has settled the real sync cadence. Add `scrape_runs.was_complete` for PARTIAL.
+
+Also: `response_model` on the Search endpoints, then generated TypeScript contracts
+(`docs/API_CONTRACTS.md` §5) replacing the hand-written `frontend/src/lib/types.ts`.
+
+## Phase 1D — Export provenance (P3)
+
+Implement the provenance contract in `docs/DAILY_CRITICAL_WORKFLOWS.md` §3.1:
+`live | cached | partial | failed`, with headers for CSV/JSONL, a distinct filename for
+non-live data, and UI confirmation before downloading cached data. Handle the unhandled
+scraper exception (E3).
+
+## Phase 1E — Acquisition boundary + scraper adapters (ADR 0004)
+
+Capture fixtures first, then extract `ShopifyAdapter`, `SallaAdapter`,
+`PlaywrightAdapter` behind `ProductObservation`, then `MarketDataAcquirer` so Sync and
+Export share acquisition without sharing persistence
+(`docs/DAILY_CRITICAL_WORKFLOWS.md` §8).
+
+## Phase 2 — Correctness and honesty (below the critical-path line)
+
+Broken or misleading rather than structurally wrong. None of this blocks P1–P3.
+Items previously listed here that turned out to serve the daily workflows have moved
+into Phase 1B (dead detection thresholds → 1B.4; duplicate-product constraints → 1B.1).
 
 - **Make Settings actually work, or remove it.** `app_settings` is written and read by
-  nothing; the UI is inert. Either wire it into `DetectionPolicy` or delete the page.
-  Shipping a settings screen that does nothing is worse than not having one.
-- **Revive the nine dead environment settings** — `MIN_PRICE_CHANGE_*`, `IGNORE_KEYWORDS`,
-  `DAILY_SUMMARY_*`, `DEFAULT_TIMEZONE`, `DEFAULT_CURRENCY` — or delete them from
-  `config.py` and `.env.example`. Documenting inert settings as live is misleading.
+  nothing; the UI is inert. If 1B.4 wires the detection thresholds in, the rest of the page
+  still does nothing. Shipping a settings screen that does nothing is worse than not
+  having one.
+- **Resolve the remaining dead environment settings** — `DAILY_SUMMARY_*`,
+  `DEFAULT_TIMEZONE`, `DEFAULT_CURRENCY` — or delete them from `config.py` and
+  `.env.example`. Documenting inert settings as live is misleading.
 - Fix `summary["biggest_drops"]`, hardcoded to `[]`.
 - Fix `.env` loading (working-directory mismatch).
 - Reconcile the Python version (venv 3.10.4 vs required ≥3.12).
+- Decide on eslint: install it, or delete the `lint` script that has never been runnable.
 - Security remediation in the order given in `docs/SECURITY.md` §4: fail-closed
   `CRON_SECRET`, CORS allowlist, mask webhook URLs, decide on Storefront token discovery,
   validate `base_url` on write, bound scraper response sizes.
 - Structured logging with `scrape_run_id` correlation (A-12).
 
-## Phase 3 — Constraints and data quality
+## Phase 3 — Remaining constraints and data quality
 
-- **Duplicate-product audit.** Report before constraining — duplicates may already exist.
-- `UNIQUE (competitor_id, url)` + partial unique on `external_id` (A-7). Needs the cleanup
-  migration.
+The product-identity constraints moved to **1B.1** — they protect Sync and cannot wait.
+What remains:
+
 - Check constraints on `event_type`, `scrape_type`, `stock_status`, `scrape_runs.status`.
 - Composite index on `(competitor_id, status, started_at)` for eligibility queries.
-- Move the Roblox taxonomy out of three source files into one owner (config or table).
-- Typed, validated `selector_config` per strategy.
+- Move the Roblox taxonomy out of three source files into one owner (config or table),
+  so adding a game stops requiring a deploy (`docs/DAILY_CRITICAL_WORKFLOWS.md` S4).
+- Typed, validated `selector_config` per strategy, so a misconfiguration fails at the API
+  instead of looking like a scraping failure.
 
 ## Phase 4 — Frontend structure
 

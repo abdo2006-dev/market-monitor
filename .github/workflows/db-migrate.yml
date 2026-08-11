@@ -1,0 +1,104 @@
+name: Database migration (manual)
+
+# MANUAL ONLY. This workflow never runs on push, on a schedule, or on deploy.
+#
+# It exists because the Vercel deployment has no migration step of its own
+# (docs/DEPLOYMENT.md §2), so migrations have to be applied deliberately by a
+# human who has just taken a backup.
+#
+# Default action is "inspect", which is READ ONLY. Applying migrations requires
+# both selecting "upgrade" AND typing the confirmation phrase, so a mis-click
+# cannot alter a production database.
+#
+# Requires repository secret: PRODUCTION_DATABASE_URL
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to do"
+        required: true
+        default: inspect
+        type: choice
+        options:
+          - inspect        # read-only diagnostic, no writes
+          - upgrade        # alembic upgrade head
+          - stamp-head     # record current schema as head WITHOUT running DDL
+      confirmation:
+        description: 'Type MIGRATE to allow a write action (ignored for "inspect")'
+        required: false
+        default: ""
+
+jobs:
+  migrate:
+    name: ${{ inputs.action }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Guard - secret present
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::PRODUCTION_DATABASE_URL secret is not set."
+            exit 1
+          fi
+
+      - name: Guard - confirmation required for write actions
+        if: inputs.action != 'inspect'
+        run: |
+          if [ "${{ inputs.confirmation }}" != "MIGRATE" ]; then
+            echo "::error::Write action '${{ inputs.action }}' requires the confirmation phrase MIGRATE."
+            exit 1
+          fi
+
+      - name: Inspect schema state (read-only)
+        id: inspect
+        run: |
+          set +e
+          python scripts/check_schema_state.py
+          echo "state=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Guard - refuse to stamp a drifted database
+        if: inputs.action == 'stamp-head'
+        run: |
+          # Exit code 20 == Case B (structurally matches, unstamped). That is the
+          # only state where stamping is safe. 30 == Case C, real drift.
+          if [ "${{ steps.inspect.outputs.state }}" != "20" ]; then
+            echo "::error::Refusing to stamp: database is not in Case B (got exit ${{ steps.inspect.outputs.state }})."
+            echo "Case C drift must be reconciled by hand - see docs/RUNBOOK.md §2.2."
+            exit 1
+          fi
+          echo "Case B confirmed."
+
+      - name: Backup reminder
+        if: inputs.action != 'inspect'
+        run: |
+          echo "::warning::This job is about to modify the production database."
+          echo "::warning::Confirm you have a backup: pg_dump \"\$DATABASE_URL\" > backup.sql"
+
+      - name: Apply migrations
+        if: inputs.action == 'upgrade'
+        run: python -m alembic upgrade head
+
+      - name: Stamp head (records revision only, runs no DDL)
+        if: inputs.action == 'stamp-head'
+        run: python -m alembic stamp head
+
+      - name: Verify final state
+        if: inputs.action != 'inspect'
+        run: python scripts/check_schema_state.py
