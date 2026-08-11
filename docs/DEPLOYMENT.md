@@ -37,17 +37,40 @@ Workflow: `.github/workflows/sync-v2.yml`.
 accept a database URL, storefront URL, token, branch, or command. The API dispatcher is
 optional (`SYNC_DISPATCH_PROVIDER=none` by default).
 
+GitHub only accepts `workflow_dispatch` when the workflow file exists on the repository's
+default branch. Scheduled workflows likewise exist and execute only from the latest
+default-branch commit. Consequently this feature branch is validation-only: neither
+production dispatch nor the schedules are available until the reviewed workflow is merged
+to `main`. Do not add a PR event or `pull_request_target` to bypass that gate.
+
 ### Automatic recovery schedule
 
-Two deliberately off-hour UTC schedules run daily:
+Two deliberately off-hour Cairo-local schedules run daily:
 
-- `17 2 * * *` — approximately 04:17 winter / 05:17 summer in Cairo;
-- `47 3 * * *` — approximately 05:47 winter / 06:47 summer in Cairo.
+- `17 7 * * *`, `timezone: Africa/Cairo` — **07:17 Cairo**;
+- `47 8 * * *`, `timezone: Africa/Cairo` — **08:47 Cairo**.
 
 Change these two `cron` expressions in the workflow if the owner's morning window moves.
-Do not remove daily idempotency when changing them. Both invocations use
+Do not replace the IANA timezone with a fixed UTC offset or remove daily idempotency. Both invocations use
 `automatic:<Africa/Cairo local date>` and identical per-competitor keys, so the second is a
 recovery opportunity, not a duplicate scan.
+
+### `production-sync` environment
+
+GitHub environment controls are separate and should be configured deliberately:
+
+- **Environment secret:** store `PRODUCTION_DATABASE_URL` in `production-sync`, not as a
+  frontend variable and preferably not as a repository-wide secret. GitHub exposes it only
+  to the `sync` job after the environment gate passes.
+- **Deployment branch restriction:** allow only the protected/default `main` branch. This
+  complements the workflow event guard and trusted checkout.
+- **Approval/protection rules:** do not configure required reviewers for routine automatic
+  morning Sync in this personal-use deployment. A required reviewer pauses every scheduled
+  job before the secret is released. Add one only if the owner explicitly prefers manual
+  approval over unattended morning freshness.
+
+The environment does not grant repository permissions. The workflow still declares only
+`contents: read`; environment protection controls eligibility and secret release.
 
 ### Public-repository threat model
 
@@ -146,10 +169,11 @@ Follow `docs/RUNBOOK.md` §2.2–2.4. Summary:
 4. audit/remediate product duplicates if needed;
 5. migrate through `0004`, then `0005` using the manual database workflow;
 6. verify head, schema constraints/indexes, and application startup;
-7. deploy API/UI with `SYNC_EXECUTION_MODE=v2` but dispatcher disabled;
-8. configure the protected GitHub environment and run one explicit request;
-9. enable the optional dispatcher if desired;
-10. set `DB_SCHEMA_CHECK=strict` only after proof.
+7. merge the reviewed branch so `sync-v2.yml` exists on default `main`;
+8. deploy API/UI with `SYNC_EXECUTION_MODE=v2` but dispatcher disabled;
+9. configure the protected GitHub environment and run one explicit request;
+10. enable the optional dispatcher if desired;
+11. set `DB_SCHEMA_CHECK=strict` only after proof.
 
 Rollback application behavior with `SYNC_EXECUTION_MODE=legacy`. A schema downgrade exists
 for controlled recovery, but do not downgrade production merely to toggle execution mode.

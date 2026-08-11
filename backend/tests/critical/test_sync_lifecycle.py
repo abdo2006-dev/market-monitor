@@ -20,7 +20,11 @@ from app.application.sync import (
     request_competitor_scan,
 )
 from app.database import AsyncSessionLocal
-from app.domain.acquisition import AcquisitionResult, acquire_catalog
+from app.domain.acquisition import (
+    INTERNAL_OBSERVED_AT_KEY,
+    AcquisitionResult,
+    acquire_catalog,
+)
 from app.models import Event, Product, ProductSnapshot, ScrapeRun, SyncRequest, SyncRequestRun
 from tests.conftest import requires_db
 from tests.critical.factories import make_competitor, make_product, observation
@@ -35,13 +39,18 @@ def acquisition(
     *,
     completeness: str = "complete",
     observed_at: datetime = BASE,
+    completed_at: datetime | None = None,
     page_cap: bool = False,
 ) -> AcquisitionResult:
+    completed_at = completed_at or observed_at
     return AcquisitionResult(
-        observations=[{**item, "observed_at": observed_at} for item in observations],
+        observations=[
+            {**item, "observed_at": item.get("observed_at", observed_at)}
+            for item in observations
+        ],
         strategy="fixture",
-        started_at=observed_at - timedelta(seconds=1),
-        completed_at=observed_at,
+        started_at=min(observed_at, completed_at) - timedelta(seconds=1),
+        completed_at=completed_at,
         pages_fetched=5 if page_cap else 1,
         request_count=5 if page_cap else 1,
         completeness=completeness,
@@ -276,6 +285,45 @@ async def test_shopify_full_fifth_page_is_conservatively_partial(monkeypatch):
     assert result.completeness == "partial"
 
 
+async def test_acquisition_preserves_server_batch_times_and_ignores_public_source_time(
+    monkeypatch,
+):
+    source_time = BASE - timedelta(days=30)
+
+    async def fake_scrape(_competitor, telemetry, **_kwargs):
+        first_time = datetime.now(timezone.utc)
+        await asyncio.sleep(0.001)
+        second_time = datetime.now(timezone.utc)
+        telemetry.update(
+            strategy="fixture", pages_fetched=2, request_count=2,
+            page_cap_reached=False,
+        )
+        return [
+            {
+                **observation("First batch", price=1),
+                "observed_at": source_time,
+                INTERNAL_OBSERVED_AT_KEY: first_time,
+            },
+            {
+                **observation("Second batch", price=2),
+                "observed_at": source_time,
+                INTERNAL_OBSERVED_AT_KEY: second_time,
+            },
+        ]
+
+    import app.services.scraper as scraper_module
+
+    monkeypatch.setattr(scraper_module, "scrape_competitor", fake_scrape)
+    result = await acquire_catalog({"scrape_type": "shopify_json", "selector_config": {}})
+
+    first_at, second_at = [item["observed_at"] for item in result.observations]
+    assert result.started_at <= first_at < second_at <= result.completed_at
+    assert source_time not in (first_at, second_at)
+    assert INTERNAL_OBSERVED_AT_KEY not in result.observations[0]
+    assert result.observation_started_at == first_at
+    assert result.observation_completed_at == second_at
+
+
 async def test_successful_observations_with_a_failed_source_are_partial(monkeypatch):
     async def fake_scrape(_competitor, telemetry, **_kwargs):
         telemetry.update(
@@ -442,18 +490,36 @@ async def test_failed_later_run_does_not_suppress_last_valid_observation(db_sess
             ),
         ),
     )
+    evidence_before_failure = (
+        await db_session.execute(
+            select(func.count(ProductSnapshot.id)).where(ProductSnapshot.product_id == product_id)
+        )
+    ).scalar_one()
     _, failed_run = await requested_run(db_session, competitor.id)
+    failed_run_id = failed_run.id
     failed_run.max_attempts = 1
     await db_session.commit()
 
     async def timeout(_):
         raise asyncio.TimeoutError()
 
-    assert (await process_claimed_run(await claim(failed_run.id), acquire=timeout))["status"] == "failed"
+    assert (await process_claimed_run(await claim(failed_run_id), acquire=timeout))["status"] == "failed"
     db_session.expire_all()
     persisted = await db_session.get(Product, product_id)
     assert persisted.current_price == Decimal("4.00")
     assert persisted.last_observed_at == BASE + timedelta(minutes=1)
+    assert (
+        await db_session.execute(
+            select(func.count(ProductSnapshot.id)).where(ProductSnapshot.product_id == product_id)
+        )
+    ).scalar_one() == evidence_before_failure
+    assert list(
+        (
+            await db_session.execute(
+                select(Event.event_type).where(Event.scrape_run_id == failed_run_id)
+            )
+        ).scalars()
+    ) == ["scrape_failed"]
 
 
 async def test_reprocessing_terminal_claim_cannot_duplicate_failure_event(db_session):
@@ -575,6 +641,99 @@ async def test_older_observation_cannot_overwrite_newer_actual_observation(db_se
             )
         ).scalars().all()
     ] == ["price_decrease"]
+
+
+async def test_earlier_five_dollar_fetch_cannot_win_by_completing_after_newer_three_dollar_fetch(
+    db_session,
+):
+    competitor = await make_competitor(db_session)
+    product = await make_product(
+        db_session, competitor, "Completion must not win", price="10",
+        last_checked_at=BASE - timedelta(days=1),
+    )
+    product_id = product.id
+    product_url = product.url
+
+    # B obtained the newer $3 evidence at T3 and returned at T4.
+    _, run_b = await requested_run(db_session, competitor.id)
+    run_b_id = run_b.id
+    run_b.started_at = BASE + timedelta(minutes=2)
+    await db_session.commit()
+    await process_claimed_run(
+        await claim(run_b_id),
+        acquire=lambda _: asyncio.sleep(
+            0,
+            result=acquisition(
+                [observation("Completion must not win", price=3, url=product_url)],
+                observed_at=BASE + timedelta(minutes=3),
+                completed_at=BASE + timedelta(minutes=4),
+            ),
+        ),
+    )
+
+    # A obtained $5 earlier at T1, but its stalled acquisition returned at T5.
+    _, run_a = await requested_run(db_session, competitor.id)
+    run_a_id = run_a.id
+    run_a.started_at = BASE
+    await db_session.commit()
+    outcome = await process_claimed_run(
+        await claim(run_a_id),
+        acquire=lambda _: asyncio.sleep(
+            0,
+            result=acquisition(
+                [observation("Completion must not win", price=5, url=product_url)],
+                observed_at=BASE + timedelta(minutes=1),
+                completed_at=BASE + timedelta(minutes=5),
+            ),
+        ),
+    )
+
+    assert outcome["status"] == "stale_skipped"
+    db_session.expire_all()
+    persisted = await db_session.get(Product, product_id)
+    persisted_a = await db_session.get(ScrapeRun, run_a_id)
+    assert persisted.current_price == Decimal("3.00")
+    assert persisted.last_observed_at == BASE + timedelta(minutes=3)
+    assert persisted_a.acquisition_completed_at == BASE + timedelta(minutes=5)
+    assert persisted_a.observation_completed_at == BASE + timedelta(minutes=1)
+
+
+async def test_equal_observation_times_use_higher_run_id_as_tie_break(db_session):
+    competitor = await make_competitor(db_session)
+    product = await make_product(
+        db_session, competitor, "Tie break", price="10",
+        last_checked_at=BASE - timedelta(days=1),
+    )
+    product_id = product.id
+    product_url = product.url
+    _, first_run = await requested_run(db_session, competitor.id)
+    first_run_id = first_run.id
+    await process_claimed_run(
+        await claim(first_run_id),
+        acquire=lambda _: asyncio.sleep(
+            0,
+            result=acquisition(
+                [observation("Tie break", price=5, url=product_url)], observed_at=BASE
+            ),
+        ),
+    )
+    _, second_run = await requested_run(db_session, competitor.id)
+    second_run_id = second_run.id
+    await process_claimed_run(
+        await claim(second_run_id),
+        acquire=lambda _: asyncio.sleep(
+            0,
+            result=acquisition(
+                [observation("Tie break", price=3, url=product_url)], observed_at=BASE
+            ),
+        ),
+    )
+
+    db_session.expire_all()
+    persisted = await db_session.get(Product, product_id)
+    assert second_run_id > first_run_id
+    assert persisted.current_price == Decimal("3.00")
+    assert persisted.last_observed_run_id == second_run_id
 
 
 async def test_newer_observed_at_supersedes_even_with_older_run_start(db_session):

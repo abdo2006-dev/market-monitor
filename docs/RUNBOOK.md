@@ -1,7 +1,7 @@
 # Runbook
 
-Operational procedures. Everything here reflects the system as it exists at `f346f70` —
-including its current rough edges.
+Operational procedures. Historical legacy diagnoses remain where they support rollback;
+§2.2–2.7 describe the current Phase 1B.2 schema and durable Sync rollout.
 
 ---
 
@@ -264,6 +264,128 @@ each row explicitly; do not bulk-update live work. Then:
 Do not put the GitHub token in browser/frontend variables. A dispatch failure should remain
 visible as a queued request; `python -m app.workers.sync_worker --drain` is the local/manual
 recovery path.
+
+### 2.5 Phase 1B.2 production release checklist
+
+Do not treat local completion as production readiness. Check every box in order.
+
+**Repository**
+
+- Push the release branch; require green CI and a reviewed PR/merge into the default
+  `main` branch.
+- Confirm `.github/workflows/sync-v2.yml` is visible on `main`. GitHub enables neither
+  `workflow_dispatch` nor `schedule` while the file exists only on a feature branch.
+
+**Database**
+
+- Run the read-only schema classifier, then take a verified backup outside the repository.
+- Follow §2.2 exactly: upgrade A-, stamp only a verified B/B- at its truthful revision,
+  and stop on C. Never stamp C.
+- Run the read-only duplicate audit. Remediate and re-audit if it reports logical groups
+  or invalid identity rows.
+- Upgrade through `0004_product_identity_integrity`, verify its product constraints, then
+  upgrade through `0005_durable_sync_lifecycle`.
+- Verify `alembic current`, both Sync tables, lifecycle/lineage foreign keys and check
+  constraints, `uq_scrape_runs_competitor_non_terminal`, and
+  `ix_scrape_runs_claimable`. Re-run the classifier. Enable strict schema validation only
+  after all checks and the smoke below succeed.
+
+**GitHub**
+
+- Create `production-sync`; put `PRODUCTION_DATABASE_URL` in that environment only.
+- Restrict environment deployment branches to protected/default `main`. Do not require a
+  reviewer for unattended morning jobs unless approval-gated Sync is explicitly desired.
+- Keep workflow permissions at `contents: read`. If server dispatch is later enabled, use
+  a separate server-only fine-grained token limited to this repository and Actions write.
+- Confirm `sync-v2.yml` is selectable on default `main` and shows 07:17/08:47
+  `Africa/Cairo` schedules.
+
+**Vercel/application**
+
+- Deploy code containing the V2 API only after the database is compatible. Start with
+  `SYNC_EXECUTION_MODE=v2`, `SYNC_DISPATCH_PROVIDER=none`, and `DB_SCHEMA_CHECK=warn`.
+- Confirm `/health`, application startup schema compatibility, and the five `/api/sync`
+  routes. Do not enable automatic API-to-GitHub dispatch yet.
+- Run §2.6. Only after proof may the optional dispatcher and `DB_SCHEMA_CHECK=strict` be
+  enabled.
+
+### 2.6 One-competitor production smoke
+
+This is an owner/operator sequence, not authorization for an agent to touch production.
+Complete §2.5 first. Choose one previously healthy, non-empty competitor from the
+benchmark or recent successful history; **do not use Shopbloxs**. Set local shell values
+without committing them:
+
+```bash
+export MARKET_MONITOR_API="https://<production-host>"
+export COMPETITOR_ID="<known-healthy-id>"
+export KNOWN_SEARCH_QUERY="<known-existing-product>"
+```
+
+1. Create exactly one durable request with a one-off idempotency value. Save the returned
+   `request_id` and its single `run_id`:
+
+```bash
+curl -sS -X POST \
+  -H "Idempotency-Key: production-smoke-1" \
+  "$MARKET_MONITOR_API/api/sync/competitors/$COMPETITOR_ID"
+```
+
+2. In Actions on default `main`, run **Durable Sync V2** with that request UUID (or, from
+   an authenticated trusted machine):
+
+```bash
+gh workflow run sync-v2.yml --ref main -f request_id="<request-uuid>"
+```
+
+3. Poll the durable request, and open its run resource. Observe `queued`, the worker's
+   `run_claimed` log/`running` state, then a terminal state; a fast run may pass through
+   `running` between polls:
+
+```bash
+curl -sS "$MARKET_MONITOR_API/api/sync/requests/<request-uuid>"
+curl -sS "$MARKET_MONITOR_API/api/sync/runs/<run-id>"
+```
+
+4. Require a non-zero `products_observed`, a sensible `complete` or conservatively
+   `partial` classification, and lifecycle ordering:
+
+```text
+requested_at <= started_at <= acquisition_started_at
+observation_started_at <= observation_completed_at <= acquisition_completed_at
+acquisition_completed_at <= reconciled_at <= terminal_at
+```
+
+5. Inspect the exact smoke run in PostgreSQL. Require products whose
+   `last_observed_run_id=<run-id>`, no duplicate canonical/identity keys, no unexpected
+   `product_removed` event, and non-null `scrape_run_id` on any snapshot/event produced by
+   the run. Review counts before interpreting a partial result; unobserved products must
+   not gain misses from partial or suspicious-empty coverage.
+6. Query `/api/search/suggestions?q=<known-existing-product>` and confirm the previously
+   expected stored result remains available. Phase 1C freshness UI is not part of this
+   smoke.
+7. Inspect the Actions log for safe IDs/counts/categories only—no database URL, storefront
+   token, raw response, webhook URL, or traceback. Record the request/run IDs as evidence.
+8. Only after all checks pass, create one `/api/sync/all` request and observe it by the
+   same durable status path. Do not use Sync All as the first proof.
+
+### 2.7 Phase 1B.2 rollback
+
+If the smoke fails, preserve evidence and prevent dual execution:
+
+1. Keep `SYNC_DISPATCH_PROVIDER=none` (or restore it) and pause/disable the GitHub Sync
+   workflow schedule. Stop any active V2 runner and inspect running leases before starting
+   legacy work.
+2. Set `SYNC_EXECUTION_MODE=legacy` in the application deployment and redeploy. Do not
+   execute a legacy scan for the same intended request while a V2 claim is still running.
+3. Leave migration `0005` and all `SyncRequest`/`ScrapeRun` records in place for diagnosis.
+   The legacy models/routes remain compatible with the additive schema. Do not downgrade
+   valid durable data merely to switch execution mode.
+4. Search continues to read existing stored `products`; a failed V2 acquisition does not
+   modify market evidence, and switching execution mode does not erase it.
+5. Diagnose by request/run ID, correct forward, then repeat the one-competitor smoke before
+   re-enabling schedules or optional dispatch. Never run legacy and V2 for the same
+   request.
 
 ### Create a new migration
 

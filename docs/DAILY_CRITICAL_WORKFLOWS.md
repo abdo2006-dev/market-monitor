@@ -246,8 +246,9 @@ increment `consecutive_misses` and deactivate at 3.
 - Complete, newer coverage may increment misses. Partial/truncated, suspicious-empty, and
   failed results never count unobserved products as absent.
 - Exactly 1,250 products across five full Shopify pages is `partial`, not complete.
-- Current price ordering uses external `observed_at`, then run ID for ties. An older
-  complete acquisition finishing later is terminal `stale_skipped`.
+- Current price ordering uses server-captured page/batch `observed_at`, then run ID for
+  ties. An earlier observation cannot become newer merely because its acquisition returns
+  later; a wholly older complete acquisition is terminal `stale_skipped`.
 - New events and snapshots reference the run that produced them.
 - GitHub workflow dispatch is not completion. A dispatch failure is visibly queued and
   remains recoverable by the scheduled worker.
@@ -305,7 +306,7 @@ evidence; Phase 1C will apply it to Search.
 
 | Signal | Source | Trustworthy? |
 |---|---|---|
-| Product last observed | `products.last_observed_at` + `last_observed_run_id` | **Yes for V2.** Actual acquisition completion time; failed/unobserved results do not advance it. |
+| Product last observed | `products.last_observed_at` + `last_observed_run_id` | **Yes for V2.** Server time at the product page/batch boundary; failed/unobserved results do not advance it. |
 | Product last seen | `products.last_seen_at` | **Yes**, and distinct from the above — a missing product's `last_checked_at` advances while `last_seen_at` does not. |
 | Observation time of the current price | `products.last_seen_at` | **Approximately.** The price was true as of the last sighting. |
 | Price actually changed at | newest `product_snapshots.checked_at` | **Yes**, but only for products that have ever changed. |

@@ -282,8 +282,10 @@ cap. An unexpected zero is `suspicious_empty` unless `allow_empty_catalog=true`.
 telemetry-proven HTTP/network failure raises `AcquisitionFailure` instead of masquerading
 as an empty result.
 
-`observed_at` is server-generated near acquisition completion. Product update ordering is
-`(observed_at, scrape_run_id)`, not request/start/commit time.
+`observed_at` is server-generated when the response page/batch is obtained (or per product
+page/card where practical). The adapter ignores storefront-provided observation clocks;
+whole-acquisition completion is only a fallback. Product update ordering is
+`(observed_at, scrape_run_id)`, not request/start/acquisition-completion/commit time.
 
 ## 2.2 Adapter contract (partially implemented)
 

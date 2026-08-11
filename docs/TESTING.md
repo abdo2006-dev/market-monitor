@@ -9,10 +9,10 @@
 
 ---
 
-## 0. Current state (Phase 1B.2)
+## 0. Current state (Phase 1B.2 release gate)
 
-The final Phase 1B.2 gate is **192 passed** against migrated PostgreSQL: 65 unit cases and
-127 critical cases. The focused lifecycle suite contains 29 cases.
+The Phase 1B.2 release gate is **197 passed** against migrated PostgreSQL: 67 non-critical
+cases and 130 critical cases. The focused lifecycle suite contains 32 cases.
 
 ```bash
 docker run -d --rm --name mm_pg -e POSTGRES_USER=market -e POSTGRES_PASSWORD=market -e POSTGRES_DB=market_monitor -p 5432:5432 postgres:16-alpine
@@ -29,10 +29,11 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:543
 | Suite | Tests | Covers |
 |---|---|---|
 | `tests/test_core.py` | 65 | pure helpers (unchanged from Phase 0) |
+| `tests/test_sync_workflow_release_gate.py` | 2 | Cairo-local schedules, safe triggers, default-branch checkout, environment, minimum permissions |
 | `tests/critical/test_schema_authority.py` | 10 | Alembic is the sole schema authority |
 | `tests/critical/test_sync_regression.py` | 32 | reconciliation, idempotency, failure, concurrency, stale ordering |
 | `tests/critical/test_product_integrity.py` | 5 | identity semantics, database constraints, duplicate audit/consolidation |
-| `tests/critical/test_sync_lifecycle.py` | 29 | requests, idempotency, claims, leases, retries, completeness, freshness, lineage, API/worker truthfulness |
+| `tests/critical/test_sync_lifecycle.py` | 32 | requests, idempotency, claims, leases, retries, page/batch observation ordering, completeness, freshness, lineage, API/worker truthfulness |
 | `tests/critical/test_search_regression.py` | 23 | matching, grouping, best price, freshness blind spot |
 | `tests/critical/test_export_regression.py` | 28 | validation, formats, fields, fallback provenance |
 
@@ -47,7 +48,9 @@ The lifecycle tests specifically prove request→queue→claim→terminal transi
 concurrent claim owner, lease recovery/fencing, retry success/exhaustion, manual/Sync-All/
 morning idempotency, the absence rules for complete/partial/capped/empty/failed results,
 observation-time ordering, failed-later preservation, history lineage and replay safety,
-HTTP 202 durability, dispatch failure truthfulness, and worker clean exit.
+completion-order inversion (`$5` observed earlier cannot beat `$3` observed later),
+equal-time run-ID tie-breaking, rejection of storefront timestamps, HTTP 202 durability,
+dispatch failure truthfulness, and worker clean exit.
 
 **Still missing**: frontend tests, backend lint/type checking, E2E, and
 integration coverage for the Dashboard/Activity/notification paths. `npm run lint` remains

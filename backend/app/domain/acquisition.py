@@ -13,6 +13,12 @@ from typing import Literal
 
 Completeness = Literal["complete", "partial", "suspicious_empty", "failed"]
 
+# Scrapers use this reserved key for a server-clock timestamp captured at the
+# response/page boundary. acquire_catalog removes it before observations cross
+# the domain boundary, and deliberately ignores any storefront-supplied
+# ``observed_at`` field.
+INTERNAL_OBSERVED_AT_KEY = "_market_monitor_observed_at"
+
 
 class AcquisitionFailure(RuntimeError):
     def __init__(self, category: str, safe_message: str, retryable: bool):
@@ -39,6 +45,24 @@ class AcquisitionResult:
     def product_count(self) -> int:
         return len(self.observations)
 
+    @property
+    def observation_started_at(self) -> datetime:
+        timestamps = [
+            item["observed_at"]
+            for item in self.observations
+            if isinstance(item.get("observed_at"), datetime)
+        ]
+        return min(timestamps, default=self.completed_at)
+
+    @property
+    def observation_completed_at(self) -> datetime:
+        timestamps = [
+            item["observed_at"]
+            for item in self.observations
+            if isinstance(item.get("observed_at"), datetime)
+        ]
+        return max(timestamps, default=self.completed_at)
+
 
 async def acquire_catalog(competitor: dict, **scrape_options) -> AcquisitionResult:
     """Run the existing adapters and enrich their output with coverage evidence."""
@@ -56,9 +80,22 @@ async def acquire_catalog(competitor: dict, **scrape_options) -> AcquisitionResu
             str(telemetry.get("failure_message") or "Catalog acquisition failed"),
             bool(telemetry.get("failure_retryable", True)),
         )
-    observations = [
-        {**observation, "observed_at": completed_at} for observation in observations
-    ]
+    normalized_observations = []
+    for observation in observations:
+        captured_at = observation.get(INTERNAL_OBSERVED_AT_KEY)
+        if not (
+            isinstance(captured_at, datetime)
+            and captured_at.tzinfo is not None
+            and started_at <= captured_at <= completed_at
+        ):
+            captured_at = completed_at
+        payload = {
+            key: value
+            for key, value in observation.items()
+            if key not in (INTERNAL_OBSERVED_AT_KEY, "observed_at")
+        }
+        normalized_observations.append({**payload, "observed_at": captured_at})
+    observations = normalized_observations
 
     allow_empty = (competitor.get("selector_config") or {}).get("allow_empty_catalog") is True
     page_cap_reached = bool(telemetry.get("page_cap_reached"))

@@ -72,19 +72,23 @@ may exist.
 
 | Field | Meaning |
 |---|---|
+| `sync_requests.requested_at` | durable user/scheduler intent was recorded; not evidence that work started |
 | `queued_at` | durable run creation |
-| `started_at` | first successful claim, retained across retries |
+| `started_at` | first successful worker claim, retained across retries; not market freshness |
 | `claimed_at` | current attempt's claim |
 | `heartbeat_at` / `lease_expires_at` | liveness/recovery evidence |
 | `acquisition_started_at` | external work began |
-| `acquisition_completed_at` | external work ended |
-| `observation_started_at` / `observation_completed_at` | external evidence window; currently matches acquisition window |
-| `reconciled_at` | product decisions were applied |
-| `terminal_at` / `finished_at` | durable terminal outcome |
+| product/snapshot `observed_at` | server time captured when that product's response page/batch (or individual product page) was obtained; whole-acquisition completion is only the fallback |
+| `acquisition_completed_at` | the adapter returned or raised; may be later than its last product evidence after local processing or a stall |
+| `observation_started_at` / `observation_completed_at` | earliest/latest accepted product evidence in the result; an empty result falls back to acquisition completion |
+| `reconciled_at` | the product decision transaction applied the result |
+| `terminal_at` / `finished_at` | durable terminal outcome was committed |
 
-Request time and run start do not order prices. `observation_completed_at`, followed by run
-ID for an equal timestamp, orders actual market evidence. Reconciliation commit time is
-operational latency, not freshness.
+Request, claim, acquisition completion, and reconciliation times do not order individual
+prices. Each product uses `(observed_at, scrape_run_id)`; equal evidence timestamps use
+the higher run ID deterministically. Whole-run coverage uses
+`(observation_completed_at, scrape_run_id)`. Reconciliation/terminal time is operational
+latency, not market freshness.
 
 ### Claim, retry, and evidence fields
 
@@ -167,8 +171,11 @@ not participate in the V2 Sync transaction or outcome.
 - safe completeness reason/warnings.
 
 The existing multi-platform scraper remains the adapter implementation and now emits
-telemetry into this contract. Each observation receives server-generated `observed_at` as
-close as practical to acquisition completion. Client timestamps are not accepted.
+telemetry into this contract. JSON/GraphQL/Salla pages receive one server-clock batch
+timestamp; generic cards and sitemap product pages are stamped individually. The
+acquisition boundary removes its reserved internal timestamp and ignores any public
+`observed_at` value supplied by storefront data. Whole-acquisition completion is used
+only when an adapter supplies no finer boundary.
 
 The fully typed, framework-free `ProductObservation` and pure `reconcile()` target have not
 yet been extracted; `services/detection.py` remains the persistence-aware reconciliation

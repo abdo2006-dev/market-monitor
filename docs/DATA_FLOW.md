@@ -44,8 +44,9 @@ React no longer selects competitors, controls concurrency, or fans out HTTP requ
 
 ## Flow 3 — Automatic Cairo morning Sync
 
-`.github/workflows/sync-v2.yml` runs twice at off-hour UTC times that bracket Cairo's
-daylight-saving offset:
+After `.github/workflows/sync-v2.yml` reaches the default branch, it runs at **07:17 and
+08:47 Africa/Cairo** every day. Each schedule entry uses the IANA timezone directly, so
+Cairo daylight-saving changes require no UTC-offset edit:
 
 ```text
 GitHub schedule
@@ -116,22 +117,23 @@ not persisted.
 ```text
 open reconciliation transaction
   → verify running status + exact claim token; lock run row
-  → record AcquisitionResult evidence
+  → record acquisition completion and the actual product evidence window
   → transaction advisory lock for competitor
   → find later complete observation by
       (observation_completed_at, run_id)
     ├─ later exists: terminal stale_skipped, no product writes
-    └─ otherwise detect_changes(... observed_at, run_id, allow_absence)
+    └─ otherwise detect_changes(... per-item observed_at, run_id, allow_absence)
          → observed newer products: update/create current state
          → changed rows: snapshot + event, both linked to run
          → only complete/newer coverage: count misses/removals
   → update competitor watermark and terminal run together            [TX]
 ```
 
-`requested_at`, `started_at`, `acquisition_started_at`,
-`observation_completed_at`, and `reconciled_at` intentionally describe different clocks.
-Current product truth uses the time the catalog was actually observed, not the time a
-runner happened to start or commit. Equal observation times use run ID as a stable tie.
+`requested_at`, `started_at`, per-product `observed_at`, `acquisition_completed_at`,
+`reconciled_at`, and `terminal_at` intentionally describe different clocks. Current
+product truth uses server time at the response page/batch boundary, not when a runner
+started, finally returned, or committed. Equal observation times use run ID as a stable
+tie. A failed acquisition never calls reconciliation and creates no market evidence.
 
 ## Flow 7 — Retry and failure
 

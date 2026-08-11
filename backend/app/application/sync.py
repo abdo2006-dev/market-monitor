@@ -378,8 +378,8 @@ async def _reconcile_acquisition(claim: ClaimedRun, result: AcquisitionResult) -
 
         run.acquisition_started_at = result.started_at
         run.acquisition_completed_at = result.completed_at
-        run.observation_started_at = result.started_at
-        run.observation_completed_at = result.completed_at
+        run.observation_started_at = result.observation_started_at
+        run.observation_completed_at = result.observation_completed_at
         run.products_found = result.product_count
         run.pages_fetched = result.pages_fetched
         run.request_count = result.request_count
@@ -403,9 +403,9 @@ async def _reconcile_acquisition(claim: ClaimedRun, result: AcquisitionResult) -
                     ScrapeRun.status == "success",
                     ScrapeRun.completeness == "complete",
                     or_(
-                        ScrapeRun.observation_completed_at > result.completed_at,
+                        ScrapeRun.observation_completed_at > result.observation_completed_at,
                         and_(
-                            ScrapeRun.observation_completed_at == result.completed_at,
+                            ScrapeRun.observation_completed_at == result.observation_completed_at,
                             ScrapeRun.id > run.id,
                         ),
                     ),
@@ -423,7 +423,7 @@ async def _reconcile_acquisition(claim: ClaimedRun, result: AcquisitionResult) -
                 competitor,
                 result.observations,
                 scrape_run_id=run.id,
-                observed_at=result.completed_at,
+                observed_at=result.observation_completed_at,
                 allow_absence=result.completeness == "complete",
             )
 

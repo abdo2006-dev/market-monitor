@@ -1,9 +1,9 @@
 name: Durable Sync V2
 
-# Production database credentials are never exposed to pull requests. Manual
-# jobs are additionally restricted to the trusted default branch. The two UTC
-# schedules bracket Cairo's DST change and are deliberately off the hour:
-# approximately 04:17/05:17 and 05:47/06:47 Africa/Cairo.
+# Production database credentials are never exposed to pull requests. GitHub
+# only enables workflow_dispatch and schedule after this file is on the default
+# branch; the job also checks out trusted default-branch code. Both recovery
+# opportunities are expressed directly in Cairo local time so DST is automatic.
 on:
   workflow_dispatch:
     inputs:
@@ -12,8 +12,10 @@ on:
         required: true
         type: string
   schedule:
-    - cron: "17 2 * * *"
-    - cron: "47 3 * * *"
+    - cron: "17 7 * * *"
+      timezone: "Africa/Cairo"
+    - cron: "47 8 * * *"
+      timezone: "Africa/Cairo"
 
 permissions:
   contents: read

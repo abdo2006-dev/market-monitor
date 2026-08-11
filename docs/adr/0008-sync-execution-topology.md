@@ -58,8 +58,8 @@ and recovery.
 The initial provider is `.github/workflows/sync-v2.yml`:
 
 - `workflow_dispatch` accepts only a durable request UUID;
-- two off-hour UTC schedules map to pre-morning recovery opportunities in
-  `Africa/Cairo` across daylight-saving changes;
+- two off-hour schedule entries run at 07:17 and 08:47 with `timezone: Africa/Cairo`, so
+  daylight-saving changes are handled by GitHub rather than fixed UTC offsets;
 - both schedules derive the same Cairo local-date idempotency key, so the second means
   “ensure/recover today” rather than “scan again”;
 - each runner recovers expired leases and drains eligible PostgreSQL work;
@@ -73,6 +73,8 @@ Security for the public repository:
 - external actions are pinned to commit SHAs and checkout credentials are not persisted;
 - permissions are `contents: read` only;
 - the database secret lives in the protected `production-sync` GitHub environment;
+- the environment restricts deployment to `main` but has no required reviewer for routine
+  scheduled work unless the owner intentionally accepts approval-gated mornings;
 - an optional fine-grained dispatcher token stays server-side, targets only this
   repository, and needs Actions write permission only;
 - workflow inputs cannot supply URLs, database credentials, or shell fragments.

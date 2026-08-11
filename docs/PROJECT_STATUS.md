@@ -3,13 +3,13 @@
 **Read this first.** This is the handoff file between working sessions. If it is stale,
 fix it as part of the task.
 
-_Last updated: 2026-08-11, Phase 1B.2 implementation and local verification._
+_Last updated: 2026-08-11, Phase 1B.2 release gate verified locally._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Phase 1B.2 complete locally** — durable, observable Sync lifecycle implemented; production migration and proof remain manual. |
+| **Current phase** | **Phase 1B.2 release gate complete locally** — ready for Phase 1C Search development; production merge, migration, and one-competitor proof remain manual. |
 | **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
 | **Working branch** | `v2/durable-sync-lifecycle` |
 | **Migration head** | `0005_durable_sync_lifecycle` |
@@ -74,9 +74,10 @@ results, and lineage; GitHub Actions is only the initial execution provider.
 - A full fifth Shopify page (`5 × 250 = 1,250`) is conservatively `partial`, because a
   sixth page may exist. Salla/generic adapters also signal a cap when pagination indicates
   more data.
-- `Product.last_observed_at` and `last_observed_run_id` guard current state. Ordering uses
-  actual acquisition completion time, then run ID as a deterministic equal-time tie-break.
-  An older complete result that arrives later is `stale_skipped`.
+- `Product.last_observed_at` and `last_observed_run_id` guard current state. Adapters stamp
+  trusted server time at each page/batch or individual product-page boundary; acquisition
+  completion is only a fallback. Run ID is the deterministic equal-time tie-break. An
+  earlier observation that returns later cannot overwrite newer evidence.
 - New snapshots and events carry nullable `scrape_run_id`; historical records are not
   assigned fabricated lineage.
 
@@ -103,10 +104,15 @@ ADR 0008 is Accepted with this staged decision:
    `python -m app.workers.sync_worker` CLI and using the same database lifecycle.
 
 `.github/workflows/sync-v2.yml` supports a safe request UUID for manual dispatch and two
-off-hour daily recovery schedules. Both scheduled invocations derive the same
+daily recovery schedules at 07:17 and 08:47 `Africa/Cairo`. Both scheduled invocations derive the same
 `automatic:<Africa/Cairo date>` request, so the second recovers rather than duplicates.
 The workflow has no PR trigger, checks out trusted `main`, uses the `production-sync`
 environment, pins third-party actions, and grants only `contents: read`.
+
+GitHub enables manual dispatch and schedules only after the workflow exists on the default
+branch. `production-sync` should restrict deployments to `main`, expose its database secret
+only to the Sync job, and omit required reviewers for unattended morning execution unless
+the owner explicitly chooses approval-gated runs.
 
 The optional API dispatcher is disabled by default. When enabled, its fine-grained GitHub
 token is server-only and should be limited to this repository with Actions write access.
@@ -141,8 +147,10 @@ the worker or set strict schema mode until the owner performs `docs/RUNBOOK.md` 
 4. duplicate audit/remediation if required;
 5. upgrade through `0004`, then `0005`;
 6. verify schema, indexes, constraints, and application startup;
-7. configure the `production-sync` environment and server dispatcher if desired;
-8. enable strict schema verification and V2 only after an explicit test request succeeds.
+7. merge the reviewed workflow to default `main` and configure `production-sync`;
+8. deploy with the optional server dispatcher initially disabled;
+9. run the documented one-competitor smoke (not Shopbloxs);
+10. enable strict schema verification and optional dispatch only after proof.
 
 Migration `0005` refuses to proceed while overlapping legacy `running` rows exist. Confirm
 that no real worker owns them before resolving them. Its downgrade is implemented, but a
@@ -156,15 +164,18 @@ used.
 
 | Gate | Result |
 |---|---|
-| Full backend | **192 passed**, 11 pre-existing warnings |
-| Critical path | **127 passed**, 65 deselected |
+| Full backend | **197 passed**, 11 pre-existing warnings |
+| Critical path | **130 passed**, 67 deselected |
+| Phase 1A daily/schema regression | **93 passed** |
 | Phase 1B.1 Sync/integrity | **37 passed** |
-| Phase 1B.2 lifecycle | **29 passed**, including 5 claim-race iterations |
-| Fresh / prior-`0004` / downgrade-re-upgrade | all reached `0005` head |
-| Alembic drift | empty generated upgrade/downgrade |
+| Phase 1B.2 lifecycle | **32 passed**, including 5 claim-race iterations |
+| Observation-order selection | **4 passed** |
+| Completeness safety selection | **5 passed** |
+| Fresh / prior-`0004` upgrade | both reached `0005` head |
+| Alembic drift | `No new upgrade operations detected` |
 | Frontend typecheck/build | pass; 943 modules, 687.84 kB main chunk |
-| Startup/workflow | 36 routes with Sync V2; YAML/security assertions pass |
-| Diff/secret safety | pass before commit |
+| Startup/workflow | 36 routes with five Sync V2 routes; 2 YAML/security tests pass |
+| Diff/secret safety | `git diff --check` and staged Gitleaks scan pass |
 
 Known pre-existing warnings remain: Pydantic class-based config, FastAPI `on_event`, the
 custom pytest-asyncio loop fixture, and Starlette's multipart import. Frontend lint is not
@@ -186,9 +197,9 @@ an available gate because ESLint is not installed; there are still no frontend u
 
 ## 8. Next recommended task
 
-After production migration and one explicit V2 proof, begin **Phase 1C: make `/search`
-trustworthy, freshness-aware, fast, and polished for daily use.** Do not start it as part
-of this phase.
+Begin **Phase 1C: make `/search` trustworthy, freshness-aware, fast, and polished for
+daily use.** Production rollout remains independently gated by the merge/migration/smoke
+checklist in `docs/RUNBOOK.md`; do not start Search as part of this release-gate commit.
 
 ## 9. Decisions not to reverse
 

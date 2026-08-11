@@ -4,11 +4,13 @@ import json
 import logging
 import re
 import ssl
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import parse_qs, parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from app.utils.price_parser import parse_price
 from app.utils.text_normalizer import normalize_title, normalize_url
+from app.domain.acquisition import INTERNAL_OBSERVED_AT_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,14 @@ GENERIC_SHOPIFY_VENDORS = {
     "shopify",
     "zyron",
 }
+
+
+def _stamp_observation(product: dict, observed_at: datetime | None = None) -> dict:
+    """Attach a trusted server-clock evidence time for the acquisition boundary."""
+    return {
+        **product,
+        INTERNAL_OBSERVED_AT_KEY: observed_at or datetime.now(timezone.utc),
+    }
 
 
 def _detect_stock(text: Optional[str]) -> str:
@@ -131,7 +141,7 @@ async def scrape_competitor(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
                         )
                         if product and product["url"] not in seen_urls:
                             seen_urls.add(product["url"])
-                            all_products.append(product)
+                            all_products.append(_stamp_observation(product))
 
                     # Pagination
                     pagination_sel = selector_config.get("pagination_next", "")
@@ -294,6 +304,7 @@ async def _scrape_shopify_json_targets_aiohttp(
                     )
                 break
 
+            observed_at = datetime.now(timezone.utc)
             products = data.get("products") or []
             if not products:
                 break
@@ -306,7 +317,7 @@ async def _scrape_shopify_json_targets_aiohttp(
                 product = _extract_shopify_product(raw, base_url, target.get("category"))
                 if product and product["url"] not in seen_urls:
                     seen_urls.add(product["url"])
-                    all_products.append(product)
+                    all_products.append(_stamp_observation(product, observed_at))
     return all_products
 
 
@@ -357,6 +368,7 @@ async def _scrape_shopify_json_targets_httpx(
                         )
                     break
 
+                observed_at = datetime.now(timezone.utc)
                 products = data.get("products") or []
                 if not products:
                     break
@@ -369,7 +381,7 @@ async def _scrape_shopify_json_targets_httpx(
                     product = _extract_shopify_product(raw, base_url, target.get("category"))
                     if product and product["url"] not in seen_urls:
                         seen_urls.add(product["url"])
-                        all_products.append(product)
+                        all_products.append(_stamp_observation(product, observed_at))
     return all_products
 
 
@@ -452,6 +464,7 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
                     )
                     break
 
+                observed_at = datetime.now(timezone.utc)
                 raw_products = data.get("data") or []
                 if not raw_products:
                     break
@@ -463,7 +476,7 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
                     key = product.get("external_id") or product.get("url") if product else None
                     if product and key not in seen:
                         seen.add(key)
-                        all_products.append(product)
+                        all_products.append(_stamp_observation(product, observed_at))
 
                 cursor = data.get("cursor") or {}
                 next_url = cursor.get("next")
@@ -563,6 +576,7 @@ async def _scrape_shopify_storefront_graphql(
                     )
                 return products
 
+            observed_at = datetime.now(timezone.utc)
             collection = (data.get("data") or {}).get("collection") or {}
             category = collection.get("title") or category
             product_edges = ((collection.get("products") or {}).get("edges")) or []
@@ -578,7 +592,7 @@ async def _scrape_shopify_storefront_graphql(
                 key = product.get("external_id") or product.get("url") if product else None
                 if product and key not in seen:
                     seen.add(key)
-                    products.append(product)
+                    products.append(_stamp_observation(product, observed_at))
 
             remaining -= len(product_edges)
             if not page_info.get("hasNextPage"):
@@ -856,7 +870,8 @@ async def _scrape_sitemap_product_pages(
             except Exception as e:
                 logger.debug("Could not fetch product page %s: %s", url, e)
                 return None
-            return _extract_product_from_storefront_html(body, url, base_url)
+            product = _extract_product_from_storefront_html(body, url, base_url)
+            return _stamp_observation(product) if product else None
 
     parsed = await asyncio.gather(*(fetch_product(url) for url in product_urls[:max_products]))
     products = []

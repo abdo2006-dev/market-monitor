@@ -3,10 +3,10 @@
 This file is the canonical operating manual for Claude, Codex, and any other coding agent
 working in this repository. Read it fully before making substantial changes.
 
-The project is currently at **V2 Phase 1B.2**. Phase 0 produced an audit and target
+The project is currently at **V2 Phase 1B.2 release-gated → Phase 1C Search**. Phase 0 produced an audit and target
 architecture; Phase 1A made migrations safe; Phase 1B.1 enforced product identity and
 concurrent reconciliation safety; Phase 1B.2 added the durable Sync request/claim/lease/
-completeness lifecycle. Read
+completeness lifecycle and its production rollout gate. Read
 `docs/PROJECT_STATUS.md` first — it tells you where the work actually stands today.
 
 ---
@@ -217,7 +217,9 @@ cd frontend && npx tsc --noEmit && npm run build
   naming Claude, Codex, GPT, or any assistant. No "Generated with" trailers in commits.
 - Do not force-update or delete `archive/pre-v2-rearchitecture` or any other archive tag.
 - Do not commit `.DS_Store`, `__pycache__/`, `*.pyc`, `node_modules/`, or `dist/`.
-- Work on a feature branch. The V2 working branch is `v2/architecture-foundation`.
+- Work on a feature branch. The completed Phase 1B.2 release branch is
+  `v2/durable-sync-lifecycle`; create a focused Phase 1C branch rather than working on
+  `main`.
 
 ---
 
