@@ -1,213 +1,169 @@
 # Deployment
 
-Two topologies exist in this repository and they are **not** equivalent. Choosing between
-them is an open decision — see `docs/adr/0006-background-jobs.md`.
+Phase 1B.2 separates durable Sync business state from its execution provider. PostgreSQL
+owns requests, claims, leases, retries, completeness, and outcomes. GitHub Actions is the
+initial personal-use runner; Railway is the compatible reliability upgrade. Vercel remains
+the web/API host and Docker Compose remains the complete local development topology.
 
----
+No production deployment or database migration is automatic.
 
-## 1. Topology A — Docker Compose (complete architecture)
+## 1. Initial production topology
 
-`docker-compose.yml`. Six services.
-
-| Service | Image / build | Command | Port |
-|---|---|---|---|
-| `postgres` | `postgres:16-alpine` | — | 5432 |
-| `redis` | `redis:7-alpine` | — | 6379 |
-| `backend` | `./backend` | `alembic upgrade head && uvicorn app.main:app --reload` | 8000 |
-| `celery_worker` | `./backend` | `celery -A app.workers.celery_app worker --concurrency=2` | — |
-| `celery_beat` | `./backend` | `celery -A app.workers.celery_app beat` | — |
-| `frontend` | `./frontend` | nginx (`frontend/nginx.conf`) | 3000→80 |
-
-`postgres` and `redis` have healthchecks; backend, worker, and beat all wait on
-`service_healthy`.
-
-```bash
-docker compose up --build
+```text
+Browser ───────> Vercel frontend/FastAPI ───────> PostgreSQL
+                         │                            ▲
+                         └─ optional dispatch         │
+                                   │                 │
+                                   v                 │
+                         GitHub Actions runner ───────┘
+                         (same Sync worker CLI)
 ```
 
-Frontend at `http://localhost:3000`, API at `http://localhost:8000`, docs at
-`http://localhost:8000/docs`.
+Manual API flow commits a durable request first, then optionally calls GitHub's workflow
+dispatch API. Scheduled GitHub jobs create/reuse the deterministic Cairo morning request
+and drain eligible work. A dispatch outage therefore changes only dispatch metadata; it
+cannot lose or falsely complete the job.
 
-Notes:
+Live Export remains synchronous on the Vercel request path. Discord notification delivery
+remains legacy and does not determine Sync success.
 
-- The backend service is the **only** place migrations are ever applied. If you run the
-  worker without the backend, the schema is whatever was there before.
-- `--reload` is on: this is a development configuration, not a production one.
-- Both backend and worker mount `./backend:/app`, so container code is host code.
-- `celery_beat` is given no `USER_AGENT`, `PLAYWRIGHT_HEADLESS`, or Discord settings —
-  harmless today because beat only enqueues, but it will matter if beat ever executes.
+## 2. GitHub Actions Sync runner
 
-### Scheduling in Topology A
+Workflow: `.github/workflows/sync-v2.yml`.
 
-Celery beat, `workers/celery_app.py:26`:
+### Manual
 
-- `check-scan-schedule` → `check_and_schedule_scans` every **60 seconds**. Enqueues a scan
-  for any active competitor whose `last_scan_at` is older than its
-  `scan_frequency_minutes` and which has no run marked `running` within 30 minutes.
-- `send-daily-summary` → every **86400 seconds from beat start**. This is an interval, not
-  a wall-clock time; restarting beat moves the daily summary. `DAILY_SUMMARY_TIME` is not
-  consulted.
+`workflow_dispatch` accepts one `request_id` UUID created by Market Monitor. It does not
+accept a database URL, storefront URL, token, branch, or command. The API dispatcher is
+optional (`SYNC_DISPATCH_PROVIDER=none` by default).
 
----
+### Automatic recovery schedule
 
-## 2. Topology B — Vercel (what is actually deployed)
+Two deliberately off-hour UTC schedules run daily:
 
-`vercel.json`.
+- `17 2 * * *` — approximately 04:17 winter / 05:17 summer in Cairo;
+- `47 3 * * *` — approximately 05:47 winter / 06:47 summer in Cairo.
 
-```jsonc
-{
-  "experimentalServices": {
-    "api": { "entrypoint": "backend/main.py", "routePrefix": "/api",
-             "memory": 2048, "maxDuration": 300, "includeFiles": "backend/app/**" },
-    "web": { "entrypoint": "frontend", "routePrefix": "/" }
-  },
-  "crons": [ { "path": "/api/cron/daily", "schedule": "0 8 * * *" } ]
-}
+Change these two `cron` expressions in the workflow if the owner's morning window moves.
+Do not remove daily idempotency when changing them. Both invocations use
+`automatic:<Africa/Cairo local date>` and identical per-competitor keys, so the second is a
+recovery opportunity, not a duplicate scan.
+
+### Public-repository threat model
+
+- No PR event can run the secret-bearing job; there is no `pull_request_target`.
+- Manual work is guarded to `refs/heads/main`; checkout explicitly selects trusted `main`.
+- `actions/checkout` and `actions/setup-python` are pinned to commit SHAs.
+- Workflow permission is only `contents: read`; checkout credentials are not persisted.
+- `PRODUCTION_DATABASE_URL` belongs in the protected `production-sync` environment.
+- The optional dispatcher token is server-only, fine-grained, limited to this repository,
+  and requires Actions write permission only.
+- Shell/debug tracing must not be enabled and worker logs contain only safe IDs, counts,
+  states, categories, and timestamps.
+
+GitHub scheduled execution remains best-effort. The two opportunities, durable leases,
+and future drains recover state, but cannot guarantee exact start time.
+
+The shared CLI emits JSON lines with non-secret identifiers/state. Exit codes are `0` for
+completed/no eligible work, `1` for terminal or unexpected failure, `2` when durable retry
+is waiting, and `3` for invalid/unavailable requested work. PostgreSQL status remains the
+authoritative diagnosis even when the provider marks a job failed.
+
+## 3. Railway upgrade
+
+Deploy the same backend code and dependency set with the same PostgreSQL connection and
+run `python -m app.workers.sync_worker` repeatedly as a persistent service. A small service
+loop can invoke `--once`/`--drain`; the CLI and all application logic are unchanged.
+
+Configure at minimum:
+
+```text
+DATABASE_URL=<managed PostgreSQL async URL>
+SYNC_EXECUTION_MODE=v2
+DB_SCHEMA_CHECK=strict
 ```
 
-`backend/main.py` is an ASGI wrapper around the FastAPI app that rewrites incoming paths
-to prepend `/api` for anything that is not `/health`:
+Provider migration procedure:
 
-```python
-if path and path != "/health" and not path.startswith("/api"):
-    scope["path"] = f"/api{path}"
-```
+1. keep GitHub scheduled/manual execution active while Railway is deployed in an explicit
+   test window;
+2. verify Railway claims, heartbeats, terminal results, and retries in PostgreSQL;
+3. stop API GitHub dispatch and GitHub schedules;
+4. confirm the Railway worker drains an intentionally queued request;
+5. retain the same status API/UI and database schema.
 
-This exists to reconcile Vercel's route prefixing with the routers' own `/api` prefixes.
-It is not exercised in local development, so routing behaviour differs between
-environments.
+Only provider configuration and process supervision change. Request, acquisition,
+reconciliation, completeness, retry, and freshness code do not.
 
-### What Topology B does not have
+## 4. Docker Compose and legacy coexistence
 
-- **No Celery worker.** Any code path calling `.delay()` enqueues to Redis with no
-  consumer. The task never runs; the API still returns a `task_id`.
-- **No Celery beat.** Scheduling depends entirely on the Vercel cron.
-- **No migration step.** Nothing runs `alembic upgrade head`. The schema is whatever
-  `init_db()`'s `create_all` produced on first boot — with no `alembic_version` stamp.
-  See `docs/ARCHITECTURE.md` A-1; this is the most dangerous consequence of this topology.
-- **No Playwright browser.** The serverless bundle does not install Chromium, so any
-  competitor using `generic_selector` with listing URLs cannot be scraped at all.
+`docker-compose.yml` still contains PostgreSQL, Redis, backend, Celery worker/beat, and the
+frontend. This is useful for development and notification compatibility.
 
-### Scheduling in Topology B
+With `SYNC_EXECUTION_MODE=v2`:
 
-One cron, `0 8 * * *` UTC → `GET /api/cron/daily`:
+- V2 manual and cron routes create PostgreSQL jobs;
+- `sync_worker.py` consumes them;
+- the old every-minute Celery scan scheduler is disabled;
+- legacy Celery scan tasks remain callable only as rollback code;
+- Redis is not a Sync source of truth.
 
-```
-_check_auth(authorization)          # no-op unless CRON_SECRET is set
-→ scan_due(...)                     # sequential, inline, per due competitor
-→ _send_daily_summary_async()
-```
+With `SYNC_EXECUTION_MODE=legacy`, the old inline/Celery branches are restored. Do not run
+V2 workers and create legacy requests for the same intended scan. Remove Celery/Redis Sync
+code only after explicit production proof; notification cleanup is separate work.
 
-All due competitors are scanned **sequentially inside a single 300-second invocation**.
-With ~6 competitors and Shopify catalogues of a few hundred products this currently fits;
-it will not scale, and there is no partial-progress recovery — a timeout loses the tail of
-the list with no record of which competitors were missed.
+## 5. Environment variables
 
-### Consequences of the split
+Safe template: `.env.example`. Never commit `.env`, tokens, database URLs, browser
+profiles, or webhook URLs.
 
-| | Compose | Vercel |
+| Variable | Default | Purpose |
 |---|---|---|
-| Queued scans | run | **silently never run** |
-| Scan cadence | per-competitor, minute granularity | once daily, all-at-once |
-| Playwright scraping | works | **impossible** |
-| Migrations | applied on deploy | **never applied** |
-| Long scans | 900 s task limit | 300 s hard request limit |
+| `DATABASE_URL` | local PostgreSQL | API and worker durable state |
+| `SYNC_EXECUTION_MODE` | `v2` | explicit durable/legacy boundary |
+| `SYNC_MAX_ATTEMPTS` | `3` | durable run attempt budget |
+| `SYNC_LEASE_SECONDS` | `600` | claim lease; heartbeat renews at most every 60s |
+| `SYNC_DISPATCH_PROVIDER` | `none` | set `github_actions` only on the server |
+| `GITHUB_ACTIONS_DISPATCH_TOKEN` | unset | fine-grained server-only Actions token |
+| `GITHUB_ACTIONS_REPOSITORY` | unset | `owner/repository` dispatch target |
+| `GITHUB_ACTIONS_WORKFLOW` | `sync-v2.yml` | workflow identifier |
+| `GITHUB_ACTIONS_REF` | `main` | trusted dispatch ref |
+| `CRON_SECRET` | unset | bearer protection for HTTP cron compatibility |
+| `DB_SCHEMA_CHECK` | `warn` | change to `strict` only after production migration |
+| `CELERY_BROKER_URL` / `CELERY_RESULT_BACKEND` | local Redis | legacy/notification path only under V2 |
+| scraper/Discord settings | see `.env.example` | existing adapter and notification configuration |
 
-This is the largest dev/prod divergence in the project. Any Phase 1 work on the scan
-pathway must decide which topology is authoritative.
+The GitHub workflow sets `DATABASE_URL` from `secrets.PRODUCTION_DATABASE_URL` in the
+`production-sync` environment. It must not share the optional GitHub dispatcher token.
 
----
+## 6. Staged production deployment
 
-## 3. Environment variables
+Follow `docs/RUNBOOK.md` §2.2–2.4. Summary:
 
-Template: `.env.example` (safe to read; contains no real values). Real values live in
-`.env` / `.env.local`, both gitignored. **Never commit them.**
+1. classify the database read-only;
+2. back up and verify a restore plan;
+3. resolve Case B/B-/C honestly; never stamp Case C;
+4. audit/remediate product duplicates if needed;
+5. migrate through `0004`, then `0005` using the manual database workflow;
+6. verify head, schema constraints/indexes, and application startup;
+7. deploy API/UI with `SYNC_EXECUTION_MODE=v2` but dispatcher disabled;
+8. configure the protected GitHub environment and run one explicit request;
+9. enable the optional dispatcher if desired;
+10. set `DB_SCHEMA_CHECK=strict` only after proof.
 
-| Variable | Default | Actually used? |
-|---|---|---|
-| `DATABASE_URL` | `postgresql+asyncpg://market:market@localhost:5432/market_monitor` | yes |
-| `CELERY_BROKER_URL` | `redis://localhost:6379/0` | yes |
-| `CELERY_RESULT_BACKEND` | `redis://localhost:6379/0` | yes |
-| `USER_AGENT` | a Chrome UA string | yes — but overridden for Shopify (`scraper.py:277`) |
-| `PLAYWRIGHT_HEADLESS` | `true` | yes |
-| `DEFAULT_MAX_PAGES` | `5` | yes |
-| `DEFAULT_PAGE_DELAY_SECONDS` | `2.0` | yes |
-| `DISCORD_NOTIFICATIONS_ENABLED` | `true` | yes |
-| `DISCORD_DEFAULT_WEBHOOK_URL` | `None` | yes |
-| `RUN_SCANS_INLINE` | `false` | yes |
-| `CRON_SECRET` | `None` | yes — **but auth is skipped entirely when unset** |
-| `SECRET_KEY` | `change-me-in-production` | **no** |
-| `REDIS_URL` | `redis://localhost:6379/0` | **no** |
-| `DEFAULT_TIMEZONE` / `DEFAULT_CURRENCY` | `UTC` / `USD` | **no** |
-| `DEFAULT_SCAN_INTERVAL_MINUTES` | `60` | **no** |
-| `MIN_PRICE_CHANGE_AMOUNT` / `MIN_PRICE_CHANGE_PERCENTAGE` | `0.01` / `0.1` | **no** |
-| `IGNORE_KEYWORDS` | `""` | **no** |
-| `DAILY_SUMMARY_ENABLED` / `DAILY_SUMMARY_TIME` | `true` / `08:00` | **no** |
+Rollback application behavior with `SYNC_EXECUTION_MODE=legacy`. A schema downgrade exists
+for controlled recovery, but do not downgrade production merely to toggle execution mode.
+Never allow an old lease owner to keep running during rollback.
 
-Nine settings are inert. Setting them changes nothing. They are documented as live in
-`.env.example`, which is misleading; correcting that file is Phase 1 work.
+## 7. Known deployment risks
 
-### `.env` loading
-
-`config.py:29` sets `env_file = ".env"`, resolved relative to the **working directory**.
-The only `.env` is at the repository root, and the backend runs from `backend/`. So:
-
-- Running `uvicorn app.main:app` from `backend/` → **`.env` is not loaded**, class
-  defaults apply.
-- Docker Compose → env vars are injected directly by the compose file, so `.env` is
-  irrelevant there.
-- Vercel → env vars come from the project settings.
-
-If a local setting appears to have no effect, this is why.
-
-### `DATABASE_URL` normalization
-
-`database.py:9` accepts `postgres://` and `postgresql://` and rewrites both to
-`postgresql+asyncpg://`. It strips `sslmode` and `channel_binding` query parameters and
-converts `sslmode` into `connect_args={"ssl": True}` — asyncpg does not accept libpq-style
-parameters. This makes managed-Postgres URLs (Neon, Supabase, Heroku) work as pasted.
-
-`poolclass=NullPool` (`database.py:31`): every session opens a new connection. Correct for
-serverless, wasteful under Compose, and it means concurrent scans consume connections
-linearly with no ceiling.
-
----
-
-## 4. Deploying
-
-### Compose
-
-```bash
-docker compose up --build -d
-```
-
-Migrations run automatically in the `backend` service's command.
-
-### Vercel
-
-Push to the connected branch. **Migrations do not run.** Before any deploy that includes a
-migration, apply it manually against the production database:
-
-```bash
-cd backend && DATABASE_URL="<production-url>" .venv/bin/python -m alembic upgrade head
-```
-
-Confirm the database has an `alembic_version` table first — a `create_all`-built database
-has none, and running `upgrade head` against it will fail. See `docs/RUNBOOK.md` §2.
-
----
-
-## 5. Known deployment risks
-
-1. **The production schema is probably unstamped** (A-1). Verify before the first
-   migration-bearing deploy.
-2. **Queued scans vanish on Vercel** (A-11). Any competitor not typed `shopify_json` or
-   `salla_json` is effectively unmonitored there.
-3. **The frontend build passes with type errors** — Vite does not typecheck. Adding
-   `tsc --noEmit` to CI (Phase 0) closes this.
-4. **CORS is `allow_origins=["*"]` with credentials** (`app/main.py:19`). See
-   `docs/SECURITY.md`.
-5. **Cron endpoints are public unless `CRON_SECRET` is set.** Set it in production.
-6. **No healthcheck depth.** `/health` returns `{"status":"ok"}` without touching the
-   database, so it reports healthy during a total database outage.
-7. **687 KB single JS chunk**, no code splitting.
+1. Production schema state is unknown until the owner classifies it.
+2. GitHub schedules can be delayed/dropped and disabled after public-repository inactivity.
+3. Manual GitHub runner latency is materially higher than a persistent worker.
+4. Future-dated `retry_wait` work needs a later invocation; PostgreSQL preserves it but
+   GitHub is not a continuously polling service.
+5. Playwright was not required by the benchmark, but a future browser competitor increases
+   runner install/runtime variance.
+6. Vercel's compatibility cron and GitHub schedules may both invoke morning creation; daily
+   database idempotency prevents duplicate work, but operating both is unnecessary.
+7. CORS/cron-auth/health-depth risks outside Sync remain documented in `docs/SECURITY.md`.

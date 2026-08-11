@@ -2,6 +2,7 @@ from pydantic import BaseModel, HttpUrl, field_validator
 from typing import Optional, List, Any
 from datetime import datetime
 from decimal import Decimal
+from uuid import UUID
 
 
 # ── Competitor ──────────────────────────────────────────────────────────────
@@ -66,6 +67,8 @@ class ProductOut(BaseModel):
     first_seen_at: datetime
     last_seen_at: datetime
     last_checked_at: datetime
+    last_observed_at: Optional[datetime] = None
+    last_observed_run_id: Optional[int] = None
     active: bool
 
     class Config:
@@ -85,6 +88,8 @@ class SnapshotOut(BaseModel):
     stock_status: str
     image_url: Optional[str] = None
     checked_at: datetime
+    observed_at: Optional[datetime] = None
+    scrape_run_id: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -99,6 +104,7 @@ class EventOut(BaseModel):
     product_id: Optional[int] = None
     product_title: Optional[str] = None
     product_category: Optional[str] = None
+    scrape_run_id: Optional[int] = None
     event_type: str
     old_value: Optional[Any] = None
     new_value: Optional[Any] = None
@@ -126,6 +132,53 @@ class ScrapeRunOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class SyncRunStatus(BaseModel):
+    run_id: int
+    competitor_id: int
+    competitor_name: Optional[str] = None
+    status: str
+    trigger: str
+    queued_at: datetime
+    started_at: Optional[datetime] = None
+    acquisition_started_at: Optional[datetime] = None
+    acquisition_completed_at: Optional[datetime] = None
+    reconciled_at: Optional[datetime] = None
+    terminal_at: Optional[datetime] = None
+    attempt: int
+    max_attempts: int
+    next_attempt_at: Optional[datetime] = None
+    lease_expires_at: Optional[datetime] = None
+    failure_category: Optional[str] = None
+    failure_reason: Optional[str] = None
+    products_observed: int
+    pages_fetched: int
+    page_cap_reached: bool
+    acquisition_strategy: Optional[str] = None
+    completeness: str
+    completeness_reason: Optional[str] = None
+    duration_seconds: Optional[float] = None
+
+
+class SyncRequestStatus(BaseModel):
+    request_id: UUID
+    trigger: str
+    status: str
+    requested_at: datetime
+    dispatch_status: str
+    dispatch_error_category: Optional[str] = None
+    runs: List[SyncRunStatus]
+
+
+class CompetitorFreshness(BaseModel):
+    competitor_id: int
+    competitor_name: str
+    coverage_complete: bool
+    last_complete_at: Optional[datetime] = None
+    latest_partial_at: Optional[datetime] = None
+    last_failed_at: Optional[datetime] = None
+    active_run: Optional[SyncRunStatus] = None
 
 
 # ── Settings ─────────────────────────────────────────────────────────────────

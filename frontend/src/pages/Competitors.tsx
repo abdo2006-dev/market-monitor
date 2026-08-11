@@ -1,20 +1,30 @@
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getCompetitors, createCompetitor, updateCompetitor, deleteCompetitor, scanNow, scanAllCompetitors, seedDefaultCompetitors } from '../lib/api'
+import { getCompetitors, createCompetitor, updateCompetitor, deleteCompetitor, scanNow, scanAllCompetitors, seedDefaultCompetitors, getSyncFreshness, getSyncRequest } from '../lib/api'
 import { Card, Button, Table, Tr, Td, Loading, EmptyState, ErrorState } from '../components/ui'
 import { PageHeader } from '../components/layout/Sidebar'
 import { timeAgo } from '../lib/utils'
 import CompetitorForm from '../components/CompetitorForm'
-import type { Competitor, CompetitorInput } from '../lib/types'
+import type { Competitor, CompetitorInput, SyncRequestStatus } from '../lib/types'
 
 export default function CompetitorsPage() {
   const qc = useQueryClient()
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<Competitor | null>(null)
   const [scanningId, setScanningId] = useState<number | null>(null)
+  const [requestId, setRequestId] = useState<string | null>(null)
 
   const { data: competitors = [], isLoading, error } = useQuery({
     queryKey: ['competitors'], queryFn: getCompetitors,
+  })
+  const { data: freshness = [] } = useQuery({
+    queryKey: ['sync-freshness'], queryFn: getSyncFreshness, refetchInterval: 10000,
+  })
+  const { data: syncRequest } = useQuery({
+    queryKey: ['sync-request', requestId],
+    queryFn: () => getSyncRequest(requestId as string),
+    enabled: requestId !== null,
+    refetchInterval: 5000,
   })
 
   const createMut = useMutation({
@@ -34,13 +44,20 @@ export default function CompetitorsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['competitors'] }),
   })
   const scanAllMut = useMutation({
-    mutationFn: () => scanAllCompetitors(competitors),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['competitors'] }),
+    mutationFn: scanAllCompetitors,
+    onSuccess: result => {
+      setRequestId(result.request_id)
+      qc.invalidateQueries({ queryKey: ['sync-freshness'] })
+    },
   })
 
   const handleScanNow = async (id: number) => {
     setScanningId(id)
-    try { await scanNow(id) } finally { setScanningId(null) }
+    try {
+      const result = await scanNow(id)
+      setRequestId(result.request_id)
+      qc.invalidateQueries({ queryKey: ['sync-freshness'] })
+    } finally { setScanningId(null) }
   }
 
   const handleToggleActive = (competitor: Competitor) => {
@@ -52,6 +69,12 @@ export default function CompetitorsPage() {
 
   const activeCompetitors = competitors.filter(competitor => competitor.active)
   const scanControlsDisabled = scanAllMut.isPending || scanningId !== null
+  const visibleRequest: SyncRequestStatus | undefined = syncRequest || scanAllMut.data
+  const requestHasIssues = visibleRequest?.status === 'failed' || visibleRequest?.status === 'partial'
+  const freshnessByCompetitor = new Map(freshness.map(row => [row.competitor_id, row]))
+  const requestRunsByCompetitor = new Map(
+    (visibleRequest?.runs || []).map(run => [run.competitor_id, run])
+  )
 
   return (
     <div style={{ padding: '2rem' }}>
@@ -73,15 +96,20 @@ export default function CompetitorsPage() {
         }
       />
 
-      {scanAllMut.data && (
+      {visibleRequest && (
         <div style={{
           marginBottom: 16, padding: '10px 12px', borderRadius: 8,
-          background: scanAllMut.data.failed ? '#ef444414' : '#22c55e14',
-          border: `1px solid ${scanAllMut.data.failed ? '#ef444433' : '#22c55e33'}`,
-          color: scanAllMut.data.failed ? '#fca5a5' : '#86efac',
+          background: requestHasIssues ? '#ef444414' : '#6366f114',
+          border: `1px solid ${requestHasIssues ? '#ef444433' : '#6366f144'}`,
+          color: requestHasIssues ? '#fca5a5' : '#c7d2fe',
           fontSize: 13,
         }}>
-          {scanAllMut.data.message}: {scanAllMut.data.completed || 0} completed, {scanAllMut.data.queued || 0} queued, {scanAllMut.data.failed || 0} failed.
+          <strong>Sync {visibleRequest.status.replace('_', ' ')}</strong>
+          {' · '}{visibleRequest.runs.length} competitor run{visibleRequest.runs.length === 1 ? '' : 's'}
+          {' · '}runner dispatch {visibleRequest.dispatch_status.replace('_', ' ')}.
+          {visibleRequest.dispatch_status === 'failed' && (
+            <span> The request remains queued for scheduled recovery.</span>
+          )}
         </div>
       )}
 
@@ -95,14 +123,18 @@ export default function CompetitorsPage() {
             </div>
           </div>
         ) : (
-          <Table headers={['Name', 'Category', 'Status', 'Frequency', 'Last Scan', 'Products', 'Actions']}>
-            {competitors.map((c: Competitor) => (
+          <Table headers={['Name', 'Status', 'Last complete', 'Latest run', 'Observed', 'Actions']}>
+            {competitors.map((c: Competitor) => {
+              const fresh = freshnessByCompetitor.get(c.id)
+              const run = requestRunsByCompetitor.get(c.id) || fresh?.active_run
+              const runStatus = run?.status === 'retry_wait' ? 'retrying' : run?.status
+              const isPartial = run?.completeness === 'partial' || run?.completeness === 'suspicious_empty'
+              return (
               <Tr key={c.id}>
                 <Td>
                   <div style={{ fontWeight: 600, color: '#e4e4f0' }}>{c.name}</div>
                   <div style={{ fontSize: 12, color: '#8b8fa8' }}>{c.base_url}</div>
                 </Td>
-                <Td>{c.category || '—'}</Td>
                 <Td>
                   <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                     <span style={{
@@ -112,19 +144,24 @@ export default function CompetitorsPage() {
                     <span style={{ fontSize: 13, color: c.active ? '#22c55e' : '#6b7280' }}>
                       {c.active ? 'Active' : 'Inactive'}
                     </span>
-                    {c.last_scan_status === 'failed' && (
-                      <span style={{ fontSize: 11, background: '#ef444422', color: '#ef4444', padding: '2px 6px', borderRadius: 4 }}>failed</span>
+                    {(runStatus || c.last_scan_status) && (
+                      <span style={{ fontSize: 11, background: (runStatus === 'failed' || isPartial) ? '#ef444422' : '#6366f122', color: (runStatus === 'failed' || isPartial) ? '#fca5a5' : '#a5b4fc', padding: '2px 6px', borderRadius: 4 }}>
+                        {isPartial ? run?.completeness.replace('_', ' ') : (runStatus || c.last_scan_status)}
+                      </span>
                     )}
                   </div>
                 </Td>
-                <Td>{c.scan_frequency_minutes}m</Td>
                 <Td style={{ color: '#8b8fa8' }}>
-                  {c.last_scan_at ? timeAgo(c.last_scan_at) : 'Never'}
+                  {fresh?.last_complete_at ? timeAgo(fresh.last_complete_at) : 'Never'}
                 </Td>
                 <Td>
-                  <span style={{ fontSize: 12, color: '#8b8fa8' }}>
-                    {(c.listing_urls || []).length} URLs
-                  </span>
+                  <div style={{ fontSize: 12, color: '#c7d2fe' }}>{runStatus || (fresh?.coverage_complete ? 'complete' : 'no complete coverage')}</div>
+                  {run?.failure_reason && <div style={{ fontSize: 11, color: '#fca5a5', maxWidth: 220 }}>{run.failure_reason}</div>}
+                  {run?.completeness_reason && isPartial && <div style={{ fontSize: 11, color: '#fca5a5', maxWidth: 220 }}>{run.completeness_reason}</div>}
+                </Td>
+                <Td>
+                  <div>{run ? run.products_observed.toLocaleString() : '—'}</div>
+                  {run?.duration_seconds != null && <div style={{ fontSize: 11, color: '#8b8fa8' }}>{run.duration_seconds.toFixed(1)}s · attempt {run.attempt}/{run.max_attempts}</div>}
                 </Td>
                 <Td>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -147,7 +184,7 @@ export default function CompetitorsPage() {
                   </div>
                 </Td>
               </Tr>
-            ))}
+            )})}
           </Table>
         )}
       </Card>

@@ -1,14 +1,13 @@
 # API Contracts
 
-Baseline `f346f70`. The route table below was generated from the live FastAPI application
-(`app.main.app.routes`), not transcribed by hand.
+The Phase 0 inventory is retained for historical contract defects. Phase 1B.2 adds the
+explicit durable Sync contracts in §1.1 and makes them the frontend authority.
 
 ---
 
 ## 1. Route inventory
 
-26 application routes plus 5 framework routes (`/docs`, `/docs/oauth2-redirect`,
-`/openapi.json`, `/redoc`, `/health`).
+The table below is the Phase 0 inventory. New Sync V2 routes follow it.
 
 | Method | Path | Handler | `response_model` |
 |---|---|---|---|
@@ -48,11 +47,44 @@ than Phase 0.
 `backend/app/schemas/__init__.py` (`:165`, `:177`) and used by **no route**.
 `PaginatedResponse.items` is `List[Any]` even so.
 
+### 1.1 Durable Sync V2 contracts
+
+| Method | Path | Response model | Semantics |
+|---|---|---|---|
+| POST | `/api/sync/competitors/{id}` | `SyncRequestStatus` | 202 after durable commit; optional `Idempotency-Key` (max 180 chars) |
+| POST | `/api/sync/all` | `SyncRequestStatus` | 202 grouped request; one run per active competitor/reused active run |
+| GET | `/api/sync/requests/{uuid}` | `SyncRequestStatus` | aggregate state plus per-run statuses |
+| GET | `/api/sync/runs/{id}` | `SyncRunStatus` | one durable lifecycle record |
+| GET | `/api/sync/freshness` | `list[CompetitorFreshness]` | minimum backend evidence for Phase 1C |
+
+All POST responses set `Location: /api/sync/requests/{uuid}`. `status=queued` means the
+request is durable, not that acquisition started or completed. `dispatch_status=failed`
+means queued work remains recoverable; it is never converted to Sync failure/success.
+
+`SyncRunStatus` exposes only safe fields: run/competitor identity, execution status,
+trigger, lifecycle timestamps, attempt budget/retry time/lease expiry, failure category
+and sanitized reason, product/page counts, strategy, completeness/cap evidence, and
+duration. It does not expose claim tokens, worker credentials, storefront tokens, raw
+responses, or stack traces.
+
+`SyncRequestStatus.status` aggregates to `queued`, `running`, `retrying`, `success`,
+`partial`, or `failed`. A successful execution with partial/suspicious coverage aggregates
+as `partial` because it cannot establish complete market coverage.
+
+The legacy `/api/competitors/.../scan-now` and `/scan-all` paths delegate to these use
+cases under `SYNC_EXECUTION_MODE=v2`; their historical shapes below exist only when the
+explicit rollback flag is `legacy`.
+
+Existing product responses now add nullable `last_observed_at` and
+`last_observed_run_id`. Snapshot/event responses add nullable observation/run lineage.
+Legacy rows remain null; V2 reconciliation supplies real values. These additive fields are
+the per-product freshness/provenance foundation for Phase 1C.
+
 ---
 
 ## 2. Known contract defects
 
-### 2.1 `POST /api/competitors/{id}/scan-now` returns two different shapes
+### 2.1 Legacy-only: `POST /api/competitors/{id}/scan-now` has two old shapes
 
 `api/competitors.py:152`:
 
@@ -115,16 +147,19 @@ rewritten entity, but nothing tells the user their configuration was overridden.
 
 ## 3. Frontend consumption
 
-Single access point: `frontend/src/lib/api.ts`. All 20 exports. **No function declares a
-return type**; 12 take `any` parameters.
+Single access point: `frontend/src/lib/api.ts`. The daily Sync functions have explicit
+`SyncRequestStatus`/`SyncRunStatus`/`CompetitorFreshness` types. `scanAllCompetitors()` now
+makes one backend request; no React/browser fan-out remains.
 
 | Frontend function | Endpoint | Consumers |
 |---|---|---|
 | `getCompetitors` | GET `/competitors` | Competitors, Dashboard, Products, Activity, Exports, SalesTrends |
 | `createCompetitor` / `updateCompetitor` / `deleteCompetitor` | POST/PUT/DELETE `/competitors` | Competitors |
 | `seedDefaultCompetitors` | POST `/competitors/seed-defaults` | Competitors |
-| `scanNow` | POST `/competitors/{id}/scan-now` | Competitors, `scanAllCompetitors` |
-| `scanAllCompetitors` | — **client-side fan-out**, not an endpoint | Competitors |
+| `scanNow` | POST `/sync/competitors/{id}` | Competitors |
+| `scanAllCompetitors` | POST `/sync/all` | Competitors |
+| `getSyncRequest` / `getSyncRun` | GET `/sync/requests/*`, `/sync/runs/*` | Competitors polling/status |
+| `getSyncFreshness` | GET `/sync/freshness` | Competitors; Phase 1C foundation |
 | `getProducts` / `getProduct` / `getProductHistory` | `/products*` | Products, ProductDetail |
 | `getEvents` | GET `/events` | Activity |
 | `searchProducts` | GET `/search/products` | *unused* |
@@ -210,10 +245,10 @@ Cosmetic `React.ChangeEvent<any>` in event handlers is low priority and may stay
 the above is enforceable until the typecheck passes and runs in CI. Addressed in Phase 0 —
 see `docs/PROJECT_STATUS.md`.
 
-### 4.6 Remove business orchestration from React
+### 4.6 Remove business orchestration from React — completed for Sync
 
-`scanAllCompetitors` (`api.ts:14-56`) moves to the backend as `ScanAllCompetitors`. The
-frontend gets `requestBulkScan()` returning run ids, and polls. See ARCHITECTURE A-3.
+`scanAllCompetitors` now calls `/api/sync/all`; the backend request use case determines
+eligibility, deduplication, and grouping, while the page polls request/freshness status.
 
 ### 4.7 Organize the frontend by feature (unchanged)
 
@@ -237,7 +272,7 @@ redesigned in Phase 1.
 
 ---
 
-## 5. Phase 1A status and the generation plan
+## 5. Phase 1A/1B.2 status and the generation plan
 
 ### 5.1 What Phase 1A did
 
@@ -265,7 +300,7 @@ Still `any` (deliberately out of scope — not on the critical path): `getProduc
 
 `any` eliminated entirely from `MarketSearch.tsx`, `Exports.tsx`, and `Competitors.tsx`.
 
-### 5.2 Contract bug found by typing
+### 5.2 Contract bug found by typing — removed from V2 Sync
 
 `ScanAllItem.status` mixes two vocabularies. The client-side fan-out assigns
 `queued | completed | failed | skipped`, but `api.ts:55` passes through
@@ -273,9 +308,8 @@ Still `any` (deliberately out of scope — not on the critical path): `getProduc
 successful inline scan therefore yields the literal `'success'`, which no consumer checks
 for.
 
-It works by accident: `Competitors.tsx` counts `failed` and `queued` explicitly and derives
-`completed` by subtraction, so `'success'` lands in the right bucket. Typed accurately
-rather than fixed, because ADR 0003 replaces the whole client-side fan-out.
+The V2 contract replaces this mixed vocabulary with explicit request and run states. The
+old behavior remains characterized only for `SYNC_EXECUTION_MODE=legacy`.
 
 Two latent null-dereferences were also surfaced and fixed: `selected` in
 `MarketSearch.tsx:25` and `editing` in `Competitors.tsx:165`. Both were runtime-guarded by

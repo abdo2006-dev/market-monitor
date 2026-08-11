@@ -327,6 +327,11 @@ async def _check_and_schedule_async():
     from sqlalchemy import select, and_
 
     async with AsyncSessionLocal() as session:
+        from app.config import settings
+        if settings.SYNC_EXECUTION_MODE == "v2":
+            # The durable morning schedule is owned by sync-v2.yml. Keeping the old
+            # every-minute beat active would create unintended full-catalog requests.
+            return {"execution": "durable_v2", "status": "legacy_scheduler_disabled"}
         result = await session.execute(
             select(Competitor).where(Competitor.active == True)
         )

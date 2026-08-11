@@ -1,309 +1,170 @@
 # Data Flow
 
-Traced from source at baseline `f346f70`. Each flow shows the real call chain as it
-exists today, followed by the intended V2 chain.
+Current as of Phase 1B.2. `→` is a call and `[TX]` is a committed PostgreSQL
+transaction. Sync V2 is the default; legacy execution remains only behind
+`SYNC_EXECUTION_MODE=legacy`.
 
-Notation: `→` is a call, `⇢` is an async queue hop, `[TX]` marks a database commit.
+## Flow 1 — Manual competitor Sync
 
----
-
-## Flow 1 — Manual single competitor scan
-
-**Today**
-
-```
-Competitors.tsx:41 handleScanNow
-  → api.ts:13 scanNow(id)
-    → POST /api/competitors/{id}/scan-now
-      → api/competitors.py:152 scan_now
-        ├─ load Competitor, 404/400 guards
-        ├─ IF scrape_type in {shopify_json, salla_json} OR RUN_SCANS_INLINE:
-        │    → workers/tasks.py:25 _scrape_competitor_async(id)      ← API imports worker private fn
-        │       (full scan runs inside the HTTP request; see Flow 4)
-        │    ← returns {"message": "Scan completed", "result": {...}}
-        └─ ELSE:
-             ⇢ workers/tasks.py:20 scrape_competitor_task.delay(id)
-             ← returns {"message": "Scan queued", "task_id": ...}
+```text
+Competitors.tsx
+  → POST /api/sync/competitors/{id} [optional Idempotency-Key]
+    → request_competitor_scan
+      → lock competitor request key
+      → validate active competitor
+      → reuse its non-terminal run, or insert queued ScrapeRun
+      → create SyncRequest and association                         [TX]
+    → optional server-only GitHub workflow dispatch
+      → record dispatched or safe dispatch failure                 [TX]
+  ← 202 + Location + durable request/run status
+  → poll GET /api/sync/requests/{uuid}
 ```
 
-Two different response shapes from one endpoint, and the caller cannot know in advance
-which it will get. `api.ts` does not distinguish them; `Competitors.tsx` ignores the
-result entirely and just clears a spinner.
+The first commit happens before provider dispatch. A token/network failure cannot erase
+the request and is never represented as Sync success.
 
-No check for an already-running scan on this path.
+The compatibility route `POST /api/competitors/{id}/scan-now` delegates to this flow in
+V2. Its direct inline/Celery implementation runs only in legacy mode.
 
-**V2 target**
+## Flow 2 — Sync All
 
-```
-UI → POST /api/competitors/{id}/scans
-  → api layer: validate, authenticate
-    → application/RequestCompetitorScan(competitor_id, trigger=MANUAL)
-      → acquire advisory lock on competitor
-      → create ScrapeRun(status=QUEUED)                                  [TX]
-      ⇢ enqueue ProcessCompetitorScan(scrape_run_id)
-  ← 202 Accepted {scrape_run_id, status: "queued"}
-```
-
-Always the same shape, always durable, always guarded.
-
----
-
-## Flow 2 — Scan all
-
-**Today** — the UI does *not* call the backend scan-all endpoint.
-
-```
-Competitors.tsx:36 scanAllMut
-  → api.ts:14 scanAllCompetitors(competitors, concurrency=4)
-      ├─ filters competitors by .active            ← client decides eligibility
-      ├─ spawns 4 worker() coroutines              ← client decides concurrency
-      └─ each worker loops: → scanNow(competitor.id)  → Flow 1, per competitor
-      ← aggregates {total, completed, queued, failed, items[]}  ← client aggregates results
+```text
+Competitors.tsx
+  → POST /api/sync/all
+    → request_all_competitor_scans
+      → one SyncRequest
+      → each active competitor uses request_competitor_scan
+      → existing non-terminal runs are associated, not duplicated [TX]
+    → optional provider dispatch
+  ← 202 with one aggregate and all per-competitor run IDs
 ```
 
-Orchestration — eligibility, fan-out, concurrency, error capture, aggregation — is
-entirely client-side. Closing the browser tab mid-run abandons the remaining competitors.
+React no longer selects competitors, controls concurrency, or fans out HTTP requests.
+`POST /api/competitors/scan-all` is a V2 compatibility alias for the same use case.
 
-**Also present but unreachable from the UI**: `POST /api/competitors/scan-all`
-(`api/competitors.py:52`), which does its own split of queued vs inline and its own
-`asyncio.Semaphore(4)` fan-out inside a single HTTP request.
+## Flow 3 — Automatic Cairo morning Sync
 
-So scan-all has *two* server-visible implementations and the live one is in the browser.
+`.github/workflows/sync-v2.yml` runs twice at off-hour UTC times that bracket Cairo's
+daylight-saving offset:
 
-**V2 target**
-
-```
-UI → POST /api/scans/bulk
-  → api layer
-    → application/ScanAllCompetitors(trigger=MANUAL)
-      → repository: list active competitors
-      → for each: RequestCompetitorScan  (same use case as Flow 1)
-                  → lock, ScrapeRun(QUEUED)                             [TX]
-                  ⇢ enqueue
-  ← 202 {requested: n, skipped: [...], scrape_run_ids: [...]}
+```text
+GitHub schedule
+  → python -m app.workers.sync_worker --morning
+    → Cairo local date
+    → request key automatic:<YYYY-MM-DD>
+    → run keys automatic:<YYYY-MM-DD>:<competitor-id>               [TX]
+    → recover expired claims, then drain every currently eligible run
 ```
 
-The browser learns what happened by polling scrape-run state, not by driving the loop.
+Both invocations use the same request/run idempotency keys. The second invocation recovers
+or completes today's work and cannot blindly create another daily batch. It also drains a
+manual request whose optional dispatch failed.
 
----
+The authenticated `/api/cron/scan-due` and `/daily` routes converge on the same automatic
+request in V2. The old Celery beat scan scheduler explicitly returns
+`legacy_scheduler_disabled`; it would otherwise enqueue a full batch every minute.
 
-## Flow 3 — Scheduled scan
+## Flow 4 — Claim and lease
 
-**Today** — two mutually unaware schedulers exist.
-
-```
-(A) Docker Compose only — Celery beat, every 60s
-celery_app.py:27 beat "check-scan-schedule"
-  → tasks.py:163 check_and_schedule_scans
-    → tasks.py:169 _check_and_schedule_async
-      → SELECT active competitors
-      → per competitor: if last_scan_at < now - scan_frequency_minutes
-                        AND no ScrapeRun(status='running', started_at > now-30m)
-        ⇢ scrape_competitor_task.delay(id)                → Flow 4
-
-(B) Vercel only — HTTP cron, daily at 08:00 UTC
-vercel.json crons → GET /api/cron/daily
-  → api/cron.py:62 daily
-    → _check_auth(authorization)        ← no-op if CRON_SECRET unset
-    → api/cron.py:20 scan_due (called as a plain Python function, not over HTTP)
-      → per due competitor, SEQUENTIALLY:
-        → tasks.py:25 _scrape_competitor_async(id)        → Flow 4, inline
-    → tasks.py:210 _send_daily_summary_async               → Flow 6
-  ← {"status":"ok", "scan": {...}, "summary": ...}
+```text
+worker startup
+  → recover_expired_leases
+    running + expired + attempts remain → retry_wait now             [TX]
+    running + expired + attempts spent  → abandoned + failure event [TX]
+  → claim_next_run
+    SELECT eligible queued/retry_wait
+      FOR UPDATE SKIP LOCKED
+    → running, attempt + 1, worker label, UUID claim token,
+      claimed/heartbeat/lease timestamps                            [TX]
 ```
 
-(A) and (B) never run in the same deployment. (A) has minute granularity and honours
-per-competitor frequency; (B) runs once a day and scans everything due, in series, inside
-one 300-second serverless invocation.
+The claim transaction commits before any storefront request. During acquisition a short
+independent heartbeat transaction renews only the matching run/token. If a runner dies,
+the lease expires. If another worker recovers it, the replacement UUID fences the old
+process from reconciliation.
 
-**V2 target** — one scheduler, one entry point:
+## Flow 5 — Acquisition
 
-```
-scheduler (beat OR HTTP cron)
-  → application/ScanAllCompetitors(trigger=SCHEDULED, due_only=True)
-      → same RequestCompetitorScan path as Flows 1 and 2
-```
-
-The trigger becomes a recorded attribute of the `ScrapeRun`, not a different code path.
-
----
-
-## Flow 4 — Scan execution, product detection and update
-
-**Today** — `workers/tasks.py:25 _scrape_competitor_async`
-
-```
-open AsyncSessionLocal
-  → SELECT Competitor; bail if missing/inactive
-  → INSERT ScrapeRun(status='running')                                  [TX 1]
-  → SELECT 1 FROM products WHERE competitor_id=? LIMIT 1   → is_initial_scan
-  → build competitor_dict (id, base_url, listing_urls, selector_config, scrape_type)
-  → services/scraper.py:51 scrape_competitor(dict, max_pages, page_delay,
-                                             headless, user_agent)
-      → dispatch by scrape_type → see docs/SCRAPING_ARCHITECTURE.md
-      ← list[dict] of raw product observations
-  → _should_reject_empty_scrape → raise if empty and not allow_empty_catalog
-  → services/detection.py:15 detect_changes(session, competitor, products)
-      → SELECT all Products for competitor
-      → index by url, by external_id
-      → per scraped item:
-          match by url → else by external_id → else NEW
-          NEW      : INSERT Product, flush, INSERT ProductSnapshot, INSERT Event(new_product)
-          EXISTING : price differs?  → INSERT Event(price_increase|price_decrease|price_changed)
-                     stock differs?  → INSERT Event(stock_in|stock_out)
-                     title/image/url/category differ? → update in place
-                     any change      → INSERT ProductSnapshot
-                     always          : last_seen_at, last_checked_at, active=True, misses=0
-      → unseen products: consecutive_misses += 1
-                         at 3 → active=False, INSERT Event(product_removed)
-      ← {"new_products": n, "price_changes": m}
-  → update ScrapeRun(status='success', counts), Competitor(last_scan_*)  [TX 2]
-  → Flow 5
+```text
+process_claimed_run
+  → load a minimal competitor configuration                         [short TX]
+  → acquire_catalog                                                  [no DB TX]
+    → existing Shopify / Salla / generic scraper
+    → collect strategy, request/page count, cap evidence
+  ← AcquisitionResult(observations, actual timestamps, completeness, evidence)
 ```
 
-Everything from `[TX 1]` to `[TX 2]` shares one session held open across the entire
-network scrape.
+Completeness is separate from whether code executed:
 
-**V2 target**
+| Acquisition | Reconcile observations | Infer absence |
+|---|---:|---:|
+| `complete` | yes, when newer | yes, when coverage is newer |
+| `partial` | yes, when newer | no |
+| `suspicious_empty` | no observed rows | no |
+| `failed` | no | no |
 
-```
-worker → application/ProcessCompetitorScan(scrape_run_id)
-  → repo.mark_run(RUNNING)                                              [TX]
-  → ScraperAdapter.scan(ScrapeContext) → list[ProductObservation]       (no DB session held)
-  → domain: reconcile(existing_products, observations) → ChangeSet
-  → repo.apply(ChangeSet) + repo.mark_run(SUCCEEDED) + outbox.enqueue(events)  [single TX]
-```
+For Shopify, a fifth full 250-item page means another page may exist. The run records
+1,250 products, `page_cap_reached=true`, and `completeness=partial`. Salla cursor evidence
+and generic “next page” evidence receive the same conservative treatment.
 
-Scraping happens outside the transaction; persistence and event emission happen inside
-one.
+Failures become safe categories such as timeout, rate limit, temporary network, or invalid
+configuration. Raw exception bodies, tokens, response content, and connection strings are
+not persisted.
 
----
+## Flow 6 — Reconciliation and freshness
 
-## Flow 5 — Event generation and notification
-
-**Today** — still inside `_scrape_competitor_async`, after `[TX 2]`
-
-```
-→ SELECT Event WHERE competitor_id=? AND notification_sent=false
-        ← NOT scoped to this scrape run: events has no scrape_run_id column
-→ SELECT Product WHERE id IN (event product ids)  → products_map
-→ IF is_initial_scan OR pending new_product count > 25:
-     mark every new_product event sent WITHOUT sending      (flood guard, tasks.py:110)
-     notify_events = everything except new_product
-   ELSE notify_events = all pending
-→ services/notification.py:188 dispatch_event_notifications(...)
-     per event:
-       resolve webhook: competitor.discord_webhook_url or DISCORD_DEFAULT_WEBHOOK_URL
-       skip if no webhook
-       → notify_new_product / notify_price_change / notify_stock_change / notify_product_removed
-           → send_discord_webhook (aiohttp POST, 10s timeout)
-           → asyncio.sleep(1.0)                     ← serial, 1s per message
-       on success: event.notification_sent = True   ← in memory only
-       on exception: log and continue, flag stays false
-→ COMMIT                                                                [TX 3]
+```text
+open reconciliation transaction
+  → verify running status + exact claim token; lock run row
+  → record AcquisitionResult evidence
+  → transaction advisory lock for competitor
+  → find later complete observation by
+      (observation_completed_at, run_id)
+    ├─ later exists: terminal stale_skipped, no product writes
+    └─ otherwise detect_changes(... observed_at, run_id, allow_absence)
+         → observed newer products: update/create current state
+         → changed rows: snapshot + event, both linked to run
+         → only complete/newer coverage: count misses/removals
+  → update competitor watermark and terminal run together            [TX]
 ```
 
-Failure window: the webhook is delivered at the `send` call but only durably recorded at
-`[TX 3]`. A crash in between re-sends on the next scan.
+`requested_at`, `started_at`, `acquisition_started_at`,
+`observation_completed_at`, and `reconciled_at` intentionally describe different clocks.
+Current product truth uses the time the catalog was actually observed, not the time a
+runner happened to start or commit. Equal observation times use run ID as a stable tie.
 
-**V2 target**
+## Flow 7 — Retry and failure
 
-```
-ProcessCompetitorScan writes events + outbox rows in the SAME transaction as the products.
+```text
+retryable failure + attempts remain
+  → retry_wait + next_attempt_at with bounded exponential backoff    [TX]
 
-separately:
-DeliverNotifications worker
-  → claim outbox batch (SELECT ... FOR UPDATE SKIP LOCKED)
-  → NotificationAdapter.send(event)                     (idempotency key = outbox id)
-  → mark delivered / increment attempts / dead-letter after N               [TX per batch]
-```
-
----
-
-## Flow 6 — Daily summary
-
-**Today**
-
-```
-(A) celery beat "send-daily-summary", every 86400s from beat start
-(B) GET /api/cron/daily → api/cron.py:66
-
-both → tasks.py:210 _send_daily_summary_async
-  → COUNT Event(new_product) today
-  → COUNT Event(price_increase|price_decrease) today
-  → COUNT ScrapeRun(failed) today
-  → COUNT DISTINCT ScrapeRun.competitor_id today
-  → collect webhook set: DISCORD_DEFAULT_WEBHOOK_URL + every active competitor's webhook
-  → if DISCORD_NOTIFICATIONS_ENABLED: send_daily_summary(webhook, summary) per webhook
+non-retryable failure OR attempts exhausted
+  → failed + safe category/message + linked scrape_failed event      [TX]
 ```
 
-`summary["biggest_drops"]` is hardcoded to `[]` at `:248`, so the "Biggest Price Drops"
-field in the Discord embed always renders "None". `DAILY_SUMMARY_ENABLED` and
-`DAILY_SUMMARY_TIME` are not consulted.
+Failure does not call product reconciliation, advance product observation times, or alter
+missing/removal state. A retry uses the same durable run; a completed/obsolete claim token
+cannot create duplicate failure/change events.
 
-"Today" is computed as UTC midnight (`:220`) regardless of `DEFAULT_TIMEZONE`.
+## Flow 8 — Status and Search freshness foundation
 
----
+- `GET /api/sync/requests/{uuid}` aggregates queued/running/retrying/success/partial/failed.
+- `GET /api/sync/runs/{id}` exposes safe timestamps, attempts, counts, completeness, and
+  failure detail.
+- `GET /api/sync/freshness` exposes last complete observation, latest partial observation,
+  last failed attempt, coverage completeness, and any active run.
+- `products.last_observed_at` and `last_observed_run_id` identify current observation
+  provenance for Phase 1C.
 
-## Flow 7 — Failure handling
+Search does not yet render or rank by this data. Export remains the existing synchronous
+flow and its provenance defect remains Phase 1D work.
 
-**Today** — the `except` block at `tasks.py:133`
+## Flow 9 — Execution provider and notification boundaries
 
-```
-any exception in scrape or detection
-  → log
-  → ScrapeRun.status = 'failed', finished_at, error_message = str(e)[:1000]
-  → Competitor.last_scan_status = 'failed'
-  → INSERT Event(scrape_failed, event_message=str(e)[:500])
-  → COMMIT
-  → webhook = competitor.discord_webhook_url or DISCORD_DEFAULT_WEBHOOK_URL
-  → if webhook: notify_scrape_failure(webhook, name, error)   ← direct send, bypasses
-                                                                 the event pipeline;
-                                                                 notification_sent stays false
-  → return {"status": "failed", "error": str(e)}               ← swallowed: Celery sees success
-```
+The GitHub dispatcher is an infrastructure adapter invoked only after the request commit.
+The worker CLI contains no GitHub API code and can run unchanged on Railway or locally.
 
-Consequences:
-
-- `max_retries=3` / `default_retry_delay=60` on the task decorator are dead configuration.
-  `self.retry()` is never called.
-- A partially-applied detection pass is rolled back by the session's error handling, but
-  the `ScrapeRun` row and the failure `Event` are committed — so a failed scan is
-  recorded correctly even though nothing retries it.
-- `scrape_failed` events accumulate with `notification_sent = false` permanently, since
-  `dispatch_event_notifications` has no branch for that event type.
-- `DISCORD_NOTIFICATIONS_ENABLED` is **not** checked on this path — failure webhooks are
-  sent even when notifications are globally disabled.
-
-**V2 target**
-
-```
-ProcessCompetitorScan raises → worker catches
-  → classify: TransientScrapeError → mark RETRYING, re-enqueue with backoff (bounded)
-              PermanentScrapeError → mark FAILED, emit ScrapeFailed event to outbox
-  → both paths go through the outbox, so failure alerts obey the same
-    enable/disable and delivery guarantees as every other notification
-```
-
----
-
-## Flow 8 — Collection price export (synchronous, user-facing)
-
-Included because it is a second, undocumented path into the scraper.
-
-```
-Exports.tsx → collectionPricesExportUrl(...)   builds a URL, browser navigates to it
-  → GET /api/exports/collection-prices?competitor_id&collection_url&format&max_pages
-    → api/exports.py:39
-      → load Competitor (404)
-      → _validate_collection_url  ← SSRF guard: host must match competitor host
-      → _collection_scrape_payload: forces discover_collections=False,
-                                    include_all_products=False,
-                                    request_timeout_seconds=8
-      → services/scraper.py:51 scrape_competitor(...)      ← live scrape in the request
-      → if empty: _saved_collection_products(db, ...)      ← DB fallback (commit f346f70)
-      → serialize CSV / JSONL / JSON with Content-Disposition
-```
-
-Nothing is persisted and no `ScrapeRun` is recorded, so exports are invisible to the
-dashboard and to rate control.
+Discord notification delivery remains in legacy Celery/API helpers. V2 Sync commits its
+business result without waiting for delivery. Event/outbox delivery correctness is not
+claimed by Phase 1B.2.

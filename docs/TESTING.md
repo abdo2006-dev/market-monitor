@@ -1,17 +1,18 @@
 # Testing
 
-> **Phase 1B.1 update.** Sections 1–3 below described the state at the Phase 0 baseline.
-> Phase 1A added 82 database-backed regression tests for the daily critical path. Phase
-> 1B.1 adds 13 product-integrity and concurrency regressions, so
+> **Phase 1B.2 update.** Sections 1–3 below describe historical gaps at the Phase 0
+> baseline. Phase 1A/1B.1 added daily-path and product-integrity coverage. Phase 1B.2 adds
+> a real PostgreSQL lifecycle suite, so
 > several "not covered" claims are now out of date. Current state: **§0** and
 > `docs/DAILY_CRITICAL_WORKFLOWS.md` §9. The target pyramid in §4 is unchanged and still
 > the plan.
 
 ---
 
-## 0. Current state (Phase 1B.1)
+## 0. Current state (Phase 1B.2)
 
-**163 tests passing**: 65 pre-existing unit tests + 98 daily-critical-path tests.
+The final Phase 1B.2 gate is **192 passed** against migrated PostgreSQL: 65 unit cases and
+127 critical cases. The focused lifecycle suite contains 29 cases.
 
 ```bash
 docker run -d --rm --name mm_pg -e POSTGRES_USER=market -e POSTGRES_PASSWORD=market -e POSTGRES_DB=market_monitor -p 5432:5432 postgres:16-alpine
@@ -31,6 +32,7 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:543
 | `tests/critical/test_schema_authority.py` | 10 | Alembic is the sole schema authority |
 | `tests/critical/test_sync_regression.py` | 32 | reconciliation, idempotency, failure, concurrency, stale ordering |
 | `tests/critical/test_product_integrity.py` | 5 | identity semantics, database constraints, duplicate audit/consolidation |
+| `tests/critical/test_sync_lifecycle.py` | 29 | requests, idempotency, claims, leases, retries, completeness, freshness, lineage, API/worker truthfulness |
 | `tests/critical/test_search_regression.py` | 23 | matching, grouping, best price, freshness blind spot |
 | `tests/critical/test_export_regression.py` | 28 | validation, formats, fields, fallback provenance |
 
@@ -41,7 +43,13 @@ and unacceptable in CI, so CI sets it and additionally fails if a skip is detect
 conftest refuses to run unless the database name contains `test`, so the suite cannot
 truncate a real database.
 
-**Still missing** (unchanged): frontend tests, backend lint/type checking, E2E, and
+The lifecycle tests specifically prove request→queue→claim→terminal transitions, one
+concurrent claim owner, lease recovery/fencing, retry success/exhaustion, manual/Sync-All/
+morning idempotency, the absence rules for complete/partial/capped/empty/failed results,
+observation-time ordering, failed-later preservation, history lineage and replay safety,
+HTTP 202 durability, dispatch failure truthfulness, and worker clean exit.
+
+**Still missing**: frontend tests, backend lint/type checking, E2E, and
 integration coverage for the Dashboard/Activity/notification paths. `npm run lint` remains
 broken — eslint is declared in `package.json` but not installed.
 
@@ -264,7 +272,11 @@ assertions coarse.
 ## 6. Commands
 
 ```bash
-cd backend && .venv/bin/python -m pytest tests/ -q
+cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:5432/market_monitor_test .venv/bin/python -m pytest tests/ -q
+```
+
+```bash
+cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:5432/market_monitor_test .venv/bin/python -m pytest tests/critical/test_sync_lifecycle.py -q
 ```
 
 ```bash

@@ -207,9 +207,19 @@ successful scrape; and the unhandled scraper exception.
 
 ### How it works today
 
-`workers/tasks.py:_scrape_competitor_async` is the one authoritative
-reconciliation body — and it is called directly by the API layer as well as by
-Celery (ARCHITECTURE A-4).
+With `SYNC_EXECUTION_MODE=v2` (the default), every manual, bulk, and scheduled request
+creates durable `SyncRequest`/`ScrapeRun` rows through `app.application.sync`. The browser
+does not fan out. A provider-neutral worker claims PostgreSQL work, performs acquisition
+outside a long transaction, and reconciles with the Phase 1B.1 advisory lock.
+
+```text
+202 durable request -> queued -> running -> success/failed/retry_wait
+                                      |
+                                      +-> completeness: complete/partial/suspicious_empty
+```
+
+The prior `workers/tasks.py:_scrape_competitor_async` body is retained only when
+`SYNC_EXECUTION_MODE=legacy` for production rollback and notification compatibility.
 
 ```
 [TX1] INSERT ScrapeRun(status='running')
@@ -226,7 +236,23 @@ Celery (ARCHITECTURE A-4).
 `external_id`; never by title (`:42`, deliberate — preserve). Unseen products
 increment `consecutive_misses` and deactivate at 3.
 
-### Known failure modes
+### Phase 1B.2 correctness guarantees
+
+- A PostgreSQL partial unique index and request lock prevent overlapping non-terminal V2
+  runs for one competitor; `FOR UPDATE SKIP LOCKED` plus a UUID claim token gives one
+  legitimate lease owner.
+- Lease heartbeats cover long acquisition. Expired attempts recover to `retry_wait`; the
+  final expired attempt becomes `abandoned` with a safe failure event.
+- Complete, newer coverage may increment misses. Partial/truncated, suspicious-empty, and
+  failed results never count unobserved products as absent.
+- Exactly 1,250 products across five full Shopify pages is `partial`, not complete.
+- Current price ordering uses external `observed_at`, then run ID for ties. An older
+  complete acquisition finishing later is terminal `stale_skipped`.
+- New events and snapshots reference the run that produced them.
+- GitHub workflow dispatch is not completion. A dispatch failure is visibly queued and
+  remains recoverable by the scheduled worker.
+
+### Remaining/legacy failure modes
 
 | # | Failure | Evidence |
 |---|---|---|
@@ -271,28 +297,29 @@ produces a removed signal in sales trends.
 
 ## 5. Data freshness (Part D)
 
-The owner makes pricing decisions from this application. **A price without
-freshness information is potentially misleading**, and today no surface carries
-one.
+The owner makes pricing decisions from this application. **A price without freshness
+information is potentially misleading.** Phase 1B.2 now persists and exposes the minimum
+evidence; Phase 1C will apply it to Search.
 
 ### 5.1 What can be derived reliably today
 
 | Signal | Source | Trustworthy? |
 |---|---|---|
-| Product last checked | `products.last_checked_at` | **Yes.** Set on every reconciliation pass, whether or not anything changed. |
+| Product last observed | `products.last_observed_at` + `last_observed_run_id` | **Yes for V2.** Actual acquisition completion time; failed/unobserved results do not advance it. |
 | Product last seen | `products.last_seen_at` | **Yes**, and distinct from the above — a missing product's `last_checked_at` advances while `last_seen_at` does not. |
 | Observation time of the current price | `products.last_seen_at` | **Approximately.** The price was true as of the last sighting. |
 | Price actually changed at | newest `product_snapshots.checked_at` | **Yes**, but only for products that have ever changed. |
 | Last attempted sync (per competitor) | `competitors.last_scan_at` | **Yes** — written on both success and failure. |
 | Last sync outcome | `competitors.last_scan_status` | **Yes** (`success` / `failed`). |
 | Last *successful* sync (per competitor) | `MAX(scrape_runs.started_at WHERE status='success')` | **Yes**, derivable. Not denormalised. |
-| Run in progress | `scrape_runs.status = 'running'` | **No.** There is no reaper, so a crashed process leaves a permanent `running` row. Callers work around it with a 30-minute cutoff. |
-| Partial sync | — | **Not representable.** A truncated scrape is recorded as `success`. |
+| Run in progress | non-terminal `scrape_runs.status` + lease | **Yes.** Expired claims are recovered at worker startup/drain. |
+| Partial sync | `scrape_runs.completeness` | **Yes.** Independent from successful execution. |
 | Never synced | `competitors.last_scan_at IS NULL` | **Yes.** |
-| Which run produced a price | — | **Not representable.** No `scrape_run_id` on products, snapshots, or events. |
+| Which run produced history | nullable `scrape_run_id` on snapshots/events | **Yes for V2 history.** Legacy history remains honestly null. |
 
-**Summary: per-product and per-competitor freshness is already derivable and
-trustworthy. In-progress and partial states are not.**
+`GET /api/sync/freshness` exposes last complete observation, latest partial observation,
+last failure, whether current coverage is complete, and the active run. It deliberately
+does not invent age thresholds.
 
 ### 5.2 Minimal freshness model (target)
 
@@ -323,12 +350,9 @@ Per product, freshness is the **worse** of its competitor's state and its own
 `last_checked_at` age — a product can be stale even when its competitor synced
 successfully, if it was missing from recent scans.
 
-**Required new fields** (Phase 1B/1C, each needing a migration):
-
-- `scrape_runs.trigger` and a real status enum with non-terminal states (ADR 0003)
-- `scrape_runs.was_complete` (boolean) to represent PARTIAL
-- `events.scrape_run_id`, `product_snapshots.scrape_run_id` for attribution
-- optionally denormalised `competitors.last_successful_scan_at` for cheap reads
+The required lifecycle, completeness, observation, and lineage fields were added by
+migration `0005_durable_sync_lifecycle`. A denormalised successful-scan column was not
+added because the current single-user query can derive it from indexed run history.
 
 **Where it surfaces:** Search compare rows, Export provenance (§3.1), and the
 competitor list. Search is the priority — that is where decisions are made.
@@ -411,17 +435,17 @@ reconciliation, notification, and cold runner setup.
 
 ---
 
-## 7. Deployment topology (Part F) — proposal ready
+## 7. Deployment topology (Part F) — accepted and implemented
 
-The current matrix and recommendation are in ADR 0008. It proposes a ~$5/month persistent
-Railway Python worker polling durable PostgreSQL runs, with public GitHub Actions as the
-$0 fallback. Live Export stays synchronous on Vercel. The ADR remains **Proposed** pending
-the owner's cost/reliability choice; no worker, endpoint, lifecycle, or topology was
-implemented in this closeout.
+ADR 0008 selects **GitHub Actions + PostgreSQL durable jobs** for initial personal use and
+the same provider-neutral worker CLI on **Railway** as the professional reliability
+upgrade. GitHub has two Cairo-aware idempotent recovery opportunities; manual API dispatch
+is optional and server-only. Live Export stays synchronous on Vercel. See
+`docs/DEPLOYMENT.md` for security and migration details.
 
 ---
 
-## 8. Target architecture: acquisition boundary (Part G)
+## 8. Acquisition boundary (Part G)
 
 The single most useful conceptual split for these three workflows:
 
@@ -453,8 +477,9 @@ Sync needs persistence.** Today Export reaches into `scrape_competitor` directly
 by coincidence rather than contract. That is also why Export has no `ScrapeRun`,
 no provenance, and no rate control — it bypasses everything Sync built.
 
-Proposed interface — the exact shape must follow repository needs, not this
-sketch:
+Phase 1B.2 implements the Sync side as `AcquisitionResult` around the existing scraper.
+The full adapter protocol/extraction remains a later refactor; Export does not yet consume
+the new boundary.
 
 ```python
 class MarketDataAcquirer(Protocol):
@@ -474,11 +499,10 @@ class AcquisitionResult:
 implementable, and `strategy_used` is the diagnostic the current implementation
 throws away.
 
-**Phase 1A deliberately did not create these types.** Introducing an interface
-before the scraper is split (ADR 0004) would add a layer without removing one.
-The sequence is: capture fixtures → extract `ShopifyAdapter` → introduce
-`ProductObservation` → then `MarketDataAcquirer` over the adapters → then rewire
-Export and Sync to consume it. See `docs/ROADMAP.md`.
+Phase 1B.2 introduced the immutable `AcquisitionResult` boundary and adapter telemetry for
+Sync without pretending the monolithic scraper is already split. A future refactor can
+extract typed adapters/`ProductObservation`; Export still requires its Phase 1D provenance
+work before consuming this contract.
 
 ---
 
@@ -494,9 +518,10 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:543
 | `test_schema_authority.py` | 10 | Alembic is the sole schema authority |
 | `test_sync_regression.py` | 32 | reconciliation, idempotency, failure, concurrency and ordering |
 | `test_product_integrity.py` | 5 | identity contract, constraints, audit and consolidation |
+| `test_sync_lifecycle.py` | 29 | durable requests/claims/leases/retries, completeness, freshness, lineage, API/worker |
 | `test_search_regression.py` | 23 | matching, grouping, best price, freshness blind spot |
 | `test_export_regression.py` | 28 | validation, formats, fields, fallback provenance |
-| **total** | **98** | plus the 65 pre-existing unit tests = **163** |
+| **total** | **127** | plus the 65 pre-existing unit tests = **192** |
 
 Database-backed tests **skip** when `TEST_DATABASE_URL` is unset, and CI fails if
 that happens there (`.github/workflows/ci.yml`).

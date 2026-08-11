@@ -3,9 +3,10 @@
 This file is the canonical operating manual for Claude, Codex, and any other coding agent
 working in this repository. Read it fully before making substantial changes.
 
-The project is currently in **V2 Phase 1A → Phase 1B**. Phase 0 produced an audit and a
-target architecture; Phase 1A made migrations safe and built regression coverage around the
-owner's three daily workflows. Neither rewrote the application. Read
+The project is currently at **V2 Phase 1B.2**. Phase 0 produced an audit and target
+architecture; Phase 1A made migrations safe; Phase 1B.1 enforced product identity and
+concurrent reconciliation safety; Phase 1B.2 added the durable Sync request/claim/lease/
+completeness lifecycle. Read
 `docs/PROJECT_STATUS.md` first — it tells you where the work actually stands today.
 
 ---
@@ -81,10 +82,9 @@ workers/      Celery entrypoints that invoke application use cases
 
 Rules:
 
-- **API routes must not orchestrate scans.** They call an application use case and return
-  its result. Today `backend/app/api/competitors.py` and `backend/app/api/cron.py`
-  violate this; do not add new violations, and prefer to remove them when you are in the
-  area with a mandate to do so.
+- **API routes must not orchestrate scans.** V2 routes call `app.application.sync` request
+  or status use cases. The old direct implementations exist only inside explicit
+  `SYNC_EXECUTION_MODE=legacy` rollback branches; do not extend them.
 - **The API must never import private worker internals.** Importing an underscore-prefixed
   function from `app.workers.tasks` into a route is prohibited. Both call sites that do
   this today are recorded in `docs/PROJECT_STATUS.md` as known issues.
@@ -106,8 +106,9 @@ introduce a silent bug here.
 
 | Behaviour | Locations |
 |---|---|
-| Scan execution | `api/competitors.py:52` (scan-all), `api/competitors.py:152` (scan-now), `api/cron.py:20` (cron), `workers/tasks.py:19` (Celery), `frontend/src/lib/api.ts:14` (client-side fan-out) |
-| "Is a scan already running" check | `api/competitors.py:171`, `api/cron.py:37`, `workers/tasks.py:189` |
+| V2 Sync request/process | `application/sync.py` is authoritative; compatibility routes delegate under `SYNC_EXECUTION_MODE=v2` |
+| Legacy scan execution | rollback-only branches in `api/competitors.py`, `api/cron.py`, and `workers/tasks.py`; do not add consumers |
+| Non-terminal run ownership | PostgreSQL partial unique index + request advisory lock + claim fencing in `application/sync.py` |
 | Collection alias matching | `api/search_dashboard_settings.py:790`, `api/exports.py:184` |
 | Roblox game/category vocabulary | `services/scraper.py:926`, `api/search_dashboard_settings.py:56-93`, `api/exports.py:170` |
 

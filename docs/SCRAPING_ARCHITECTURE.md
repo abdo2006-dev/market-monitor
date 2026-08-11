@@ -186,114 +186,110 @@ This is business taxonomy in an infrastructure module, duplicated in
 
 ---
 
-# Part 2 — V2 target
+# Part 2 — V2 boundary and remaining target
 
-## 2.1 Authoritative scan lifecycle
+## 2.1 Authoritative Sync lifecycle (implemented)
 
-One lifecycle. The trigger is recorded, never branched on.
+One V2 lifecycle. Trigger is recorded, never used to select reconciliation behavior.
 
 ```
    HTTP request │ bulk request │ scheduler │ cron
                 └──────┬───────┴─────┬─────┘
                        ▼
-          RequestCompetitorScan(competitor_id, trigger)
+          RequestCompetitorScan / RequestAllCompetitorScans
              │
-             ├─ pg_advisory_xact_lock(hash(competitor_id))
-             ├─ reject if a non-terminal ScrapeRun exists → return existing id
-             ├─ INSERT ScrapeRun(status=QUEUED, trigger=trigger)        [TX commits]
-             └─ enqueue ProcessCompetitorScan(scrape_run_id)
+             ├─ advisory request lock + DB partial uniqueness
+             ├─ reuse non-terminal run or INSERT queued run
+             ├─ associate run(s) with durable SyncRequest              [TX commits]
+             └─ optional provider dispatch after commit
                        │
                        ▼
-          ProcessCompetitorScan(scrape_run_id)          (worker)
+          sync_worker claim + ProcessCompetitorScan
              │
-             ├─ [TX] load run; QUEUED → RUNNING (guarded); commit
-             │
-             ├─ build ScrapeContext from the competitor
-             ├─ adapter = registry.get(competitor.strategy)
-             ├─ observations = await adapter.scan(ctx)      ← NO DB SESSION HELD
-             │     may raise TransientScrapeError | PermanentScrapeError
-             │
-             ├─ [TX] ─────────────────────────────────────────────────┐
-             │    existing = product_repo.list_for(competitor_id)     │
-             │    changeset = domain.reconcile(existing,              │
-             │                                 observations,          │
-             │                                 policy, now)           │ ONE
-             │    product_repo.apply(changeset)                       │ TRANSACTION
-             │    snapshot_repo.add(changeset.snapshots, run_id)      │
-             │    event_repo.add(changeset.events, run_id)            │
-             │    outbox.enqueue_for(changeset.events)                │
-             │    run.status = SUCCEEDED, counts                      │
-             │  ──────────────────────────────────────────────────────┘
-             │
-             └─ on error:  TransientScrapeError → RETRYING, re-enqueue (bounded backoff)
-                           PermanentScrapeError → FAILED + ScrapeFailed event → outbox
-                       │
-                       ▼
-          DeliverNotifications                          (separate worker)
-             └─ [TX] claim N outbox rows FOR UPDATE SKIP LOCKED
-                     → Notifier.send(entry)   (idempotency key = outbox id)
-                     → delivered | attempts+1, available_at = backoff | dead-letter
+             ├─ [TX] FOR UPDATE SKIP LOCKED; running + UUID lease; commit
+             ├─ heartbeat matching token while acquire_catalog runs
+             ├─ AcquisitionResult                         ← NO DB TX HELD
+             │    observations + strategy + timestamps + page/request evidence
+             │    completeness: complete | partial | suspicious_empty
+             └─ [TX] verify token + advisory reconciliation lock
+                  ├─ stale newer coverage exists → stale_skipped
+                  └─ apply allowed observations/misses + lineage + terminal run
 ```
 
 ### State transitions
 
 | From | To | Trigger |
 |---|---|---|
-| — | `QUEUED` | `RequestCompetitorScan` |
-| `QUEUED` | `RUNNING` | worker picks it up |
-| `RUNNING` | `SUCCEEDED` | reconciliation committed |
-| `RUNNING` | `FAILED` | permanent error |
-| `RUNNING` | `RETRYING` | transient error, attempts < max |
-| `RETRYING` | `QUEUED` | backoff elapsed |
-| `RUNNING` | `ABANDONED` | reaper: exceeded deadline |
+| — | `queued` | request use case |
+| `queued` / `retry_wait` | `running` | atomic worker claim |
+| `running` | `success` | reconciliation committed |
+| `running` | `stale_skipped` | later complete observation already committed |
+| `running` | `retry_wait` | retryable error and attempts remain |
+| `running` | `failed` | permanent error or exhausted processing attempt |
+| expired `running` | `retry_wait` | future worker recovery with attempts left |
+| expired `running` | `abandoned` | future worker recovery after final attempt |
 
-`SUCCEEDED`, `FAILED`, `ABANDONED` are terminal.
+`success`, `stale_skipped`, `failed`, and `abandoned` are terminal.
 
 ### Idempotency
 
 - **Request** is idempotent per competitor: the advisory lock plus a partial unique index
   on non-terminal runs means a second request returns the existing run id rather than
   creating a duplicate. This is what the current unlocked read cannot guarantee.
-- **Processing** is idempotent by `scrape_run_id`: the `QUEUED → RUNNING` transition is a
-  guarded update, so a redelivered Celery message finds the run already `RUNNING` and
-  exits.
-- **Delivery** is idempotent by outbox row id, which becomes the notification's
-  idempotency key.
+- **Processing** is fenced by `(scrape_run_id, claim_token)`. A replayed/expired owner
+  cannot reconcile or emit history after the token changes.
+- **Morning scheduling** is idempotent by Cairo local-date request and per-competitor keys.
 
 ### Locking
 
-`pg_advisory_xact_lock` keyed on the competitor id, held only for the short request
-transaction — never across the scrape itself. Concurrency between different competitors is
-unaffected.
+One transaction advisory lock serializes request creation per competitor. A separate
+Phase 1B.1 advisory namespace serializes the complete reconciliation transaction. Neither
+lock spans external acquisition. Database uniqueness is the request backstop; the UUID
+claim token is the expired-owner fence.
 
 ### Retries
 
-Only `TransientScrapeError` (timeouts, 429, 5xx, connection resets) is retried. Bounded:
-3 attempts, exponential backoff with jitter. Every attempt is recorded on the run.
-`PermanentScrapeError` (404, misconfiguration, parse failure) is never retried — retrying
-it just repeats the same request against someone else's server.
+Timeouts, rate limits, transient 5xx/network errors, and lost runners are retryable.
+Invalid/unsupported configuration is non-retryable where identified. Default budget is
+three attempts with 60/120-second exponential delays; `attempt_count` and
+`next_attempt_at` are durable. A GitHub invocation may leave future retry work for the
+next manual/scheduled drain; Railway can poll continuously.
 
 ### Failure semantics
 
-- A failed scan **never** deactivates products. The current empty-result guard
-  (`_should_reject_empty_scrape`) already achieves this and must be preserved as an
-  explicit domain rule.
-- Failure produces a `ScrapeFailed` event through the outbox, so failure alerts obey the
-  same enable/disable switch and delivery guarantees as every other notification. Today
-  they bypass both.
+- `complete`: observed newer products update; unobserved products may count as missing.
+- `partial`: observed newer products update; unobserved products do not change.
+- `suspicious_empty`: no mass missing/removal inference.
+- `failed`: no product reconciliation at all.
+- Failure records a linked `scrape_failed` event with a safe category/message. Notification
+  delivery remains legacy and is intentionally independent of Sync success.
 
 ### Transaction boundaries
 
-Three short transactions, none spanning network I/O:
+Short transactions, none spanning network I/O:
 
-1. Request: lock + insert `ScrapeRun`.
-2. Claim: `QUEUED → RUNNING`.
-3. Apply: products + snapshots + events + outbox + terminal status — **atomic**.
+1. Request/group association; optional provider dispatch happens after commit.
+2. Recovery/claim and lease.
+3. Short lease heartbeats while acquisition runs outside a transaction.
+4. Products + snapshots + events + terminal status — **atomic**.
 
-Notification delivery commits separately, per batch. This is the deliberate at-least-once
-boundary: an event is durably recorded before any webhook is attempted.
+### Completeness evidence
 
-## 2.2 Adapter contract
+The current adapters populate telemetry without exposing secret URLs or tokens. Shopify's
+fifth full 250-item page is conservatively partial (`page_cap_reached=true`). Salla uses a
+remaining cursor at its cap; generic pagination uses an available next-page control at its
+cap. An unexpected zero is `suspicious_empty` unless `allow_empty_catalog=true`. A
+telemetry-proven HTTP/network failure raises `AcquisitionFailure` instead of masquerading
+as an empty result.
+
+`observed_at` is server-generated near acquisition completion. Product update ordering is
+`(observed_at, scrape_run_id)`, not request/start/commit time.
+
+## 2.2 Adapter contract (partially implemented)
+
+Phase 1B.2 introduced the concrete immutable `AcquisitionResult` boundary around the
+existing scraper. The fully split adapters/injected HTTP client below remain the target;
+do not describe them as current code.
 
 ```python
 class ScraperAdapter(Protocol):
@@ -317,10 +313,16 @@ class ScrapeContext:
     clock: Clock
 
 @dataclass(frozen=True)
-class ScrapeResult:
+class AcquisitionResult:
     observations: list[ProductObservation]
     pages_fetched: int
-    strategy_used: str            # which fallback actually produced the result
+    request_count: int
+    strategy: str                 # which fallback actually produced the result
+    started_at: datetime
+    completed_at: datetime
+    completeness: Completeness
+    page_cap_reached: bool
+    completeness_reason: str | None
     warnings: list[str]
 ```
 

@@ -14,15 +14,14 @@ An ADR is a historical record: once Accepted, it is superseded rather than edite
 | [0005](0005-generated-api-contracts.md) | Generated and CI-verified frontend API contracts | Accepted |
 | [0006](0006-background-jobs-and-delivery.md) | Background job execution and reliable notification delivery | **Partially accepted** — delivery mechanism Accepted; topology continued in ADR 0008 |
 | [0007](0007-product-identity-and-reconciliation-lock.md) | Product identity invariants and serialized reconciliation | Accepted |
-| [0008](0008-sync-execution-topology.md) | Sync execution topology | **Proposed** — persistent Railway worker; GitHub Actions fallback |
+| [0008](0008-sync-execution-topology.md) | Sync execution topology | **Accepted** — initial GitHub Actions; Railway reliability upgrade |
 
 ADRs 0001–0006 were written during Phase 0 (2026-08-10) and are supported by the audit in
 `docs/ARCHITECTURE.md` Part A. ADR 0007 records the implemented Phase 1B.1 decision. See
 `docs/PROJECT_STATUS.md` for implementation status of the earlier target decisions.
 
-**ADR 0008 is the remaining blocking decision for Phase 1B.2.** It has real benchmark and
-current-provider evidence, but remains Proposed until the owner chooses the ~$5 persistent
-worker or $0 best-effort fallback.
+ADR 0008 was accepted and implemented in Phase 1B.2. Production database migration and
+provider proof remain explicit owner-operated steps.
 
 ## Template
 

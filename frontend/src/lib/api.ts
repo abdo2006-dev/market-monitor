@@ -5,9 +5,11 @@ import type {
   CompareResponse,
   Competitor,
   CompetitorInput,
-  ScanAllItem,
   ScanAllSummary,
   ScanNowResponse,
+  CompetitorFreshness,
+  SyncRequestStatus,
+  SyncRunStatus,
   SearchSuggestionsResponse,
 } from './types'
 
@@ -26,62 +28,17 @@ export const updateCompetitor = (id: number, data: Partial<CompetitorInput>): Pr
   api.put(`/competitors/${id}`, data).then(r => r.data)
 export const deleteCompetitor = (id: number) => api.delete(`/competitors/${id}`)
 export const scanNow = (id: number): Promise<ScanNowResponse> =>
-  api.post(`/competitors/${id}/scan-now`).then(r => r.data)
+  api.post(`/sync/competitors/${id}`).then(r => r.data)
 
-/**
- * Client-side scan fan-out.
- *
- * NOTE: this is orchestration living in the transport layer, and it is scheduled
- * for removal. ADR 0003 moves eligibility, concurrency and result aggregation to
- * the backend so that closing this tab cannot abandon a bulk scan. Typed here
- * rather than redesigned, because Phase 1A does not migrate the scan pathway.
- */
-export const scanAllCompetitors = async (
-  competitors: Competitor[],
-  concurrency = 4,
-): Promise<ScanAllSummary> => {
-  const activeCompetitors = competitors.filter(competitor => competitor.active)
-  const items: ScanAllItem[] = []
-  let cursor = 0
-
-  async function worker() {
-    while (cursor < activeCompetitors.length) {
-      const competitor = activeCompetitors[cursor++]
-      try {
-        const result = await scanNow(competitor.id)
-        items.push({
-          competitor_id: competitor.id,
-          name: competitor.name,
-          status: result.result?.status || (result.task_id ? 'queued' : 'completed'),
-          result,
-        })
-      } catch (error: any) {
-        items.push({
-          competitor_id: competitor.id,
-          name: competitor.name,
-          status: 'failed',
-          error: error?.response?.data?.detail || error?.message || 'Scan failed',
-        })
-      }
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, activeCompetitors.length) }, () => worker())
-  )
-
-  const failed = items.filter(item => item.status === 'failed').length
-  const queued = items.filter(item => item.status === 'queued').length
-  const completed = items.length - failed - queued
-  return {
-    message: failed ? 'Scan all finished with errors' : 'Scan all completed',
-    total: activeCompetitors.length,
-    completed,
-    queued,
-    failed,
-    items,
-  }
-}
+/** One durable server-owned Sync All request; the browser never fans out work. */
+export const scanAllCompetitors = (): Promise<ScanAllSummary> =>
+  api.post('/sync/all').then(r => r.data)
+export const getSyncRequest = (requestId: string): Promise<SyncRequestStatus> =>
+  api.get(`/sync/requests/${requestId}`).then(r => r.data)
+export const getSyncRun = (runId: number): Promise<SyncRunStatus> =>
+  api.get(`/sync/runs/${runId}`).then(r => r.data)
+export const getSyncFreshness = (): Promise<CompetitorFreshness[]> =>
+  api.get('/sync/freshness').then(r => r.data)
 export const getCompetitor = (id: number) => api.get(`/competitors/${id}`).then(r => r.data)
 
 // Products

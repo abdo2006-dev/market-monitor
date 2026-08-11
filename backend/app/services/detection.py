@@ -17,12 +17,17 @@ async def detect_changes(
     session: AsyncSession,
     competitor: Competitor,
     scraped_products: list[dict],
+    *,
+    scrape_run_id: int | None = None,
+    observed_at: datetime | None = None,
+    allow_absence: bool = True,
 ) -> dict:
     """
     Match scraped products against stored products, create/update records,
     generate events for changes. Returns summary counts.
     """
     now = datetime.now(timezone.utc)
+    catalog_observed_at = observed_at or now
     new_count = 0
     price_change_count = 0
 
@@ -52,6 +57,7 @@ async def detect_changes(
     seen_product_ids = set()
 
     for item in observations:
+        item_observed_at = item.get("observed_at") or catalog_observed_at
         url = item["url"]
         canonical_url = item["canonical_url"]
         identity_key = item.get("identity_key")
@@ -85,6 +91,8 @@ async def detect_changes(
                 first_seen_at=now,
                 last_seen_at=now,
                 last_checked_at=now,
+                last_observed_at=item_observed_at,
+                last_observed_run_id=scrape_run_id,
                 active=True,
                 consecutive_misses=0,
             )
@@ -100,6 +108,8 @@ async def detect_changes(
                 stock_status=product.stock_status,
                 image_url=product.image_url,
                 checked_at=now,
+                observed_at=item_observed_at,
+                scrape_run_id=scrape_run_id,
             )
             session.add(snapshot)
 
@@ -118,6 +128,7 @@ async def detect_changes(
                 },
                 event_message=f"New product found: {product.title}",
                 detected_at=now,
+                scrape_run_id=scrape_run_id,
             )
             session.add(event)
             new_count += 1
@@ -130,6 +141,18 @@ async def detect_changes(
             changed = False
             snapshot_needed = False
             seen_product_ids.add(product.id)
+
+            # External observation time, not request or commit order, owns current
+            # product freshness. Equal timestamps are deterministically ordered by
+            # ScrapeRun id; legacy observations without a run id do not displace a
+            # V2 observation at the same instant.
+            if not _is_newer_observation(
+                item_observed_at,
+                scrape_run_id,
+                product.last_observed_at,
+                product.last_observed_run_id,
+            ):
+                continue
 
             old_price = product.current_price
             new_price = item.get("price")
@@ -157,6 +180,7 @@ async def detect_changes(
                                "diff_percentage": round(diff_pct, 2) if diff_pct else None},
                     event_message=f"Price changed for {product.title}: {old_val} -> {new_val}",
                     detected_at=now,
+                    scrape_run_id=scrape_run_id,
                 )
                 session.add(event)
                 product.current_price = new_price
@@ -176,6 +200,7 @@ async def detect_changes(
                     new_value={"stock_status": new_stock, "category": new_category},
                     event_message=f"Stock changed for {product.title}: {old_stock} -> {new_stock}",
                     detected_at=now,
+                    scrape_run_id=scrape_run_id,
                 )
                 session.add(event)
                 product.stock_status = new_stock
@@ -214,6 +239,8 @@ async def detect_changes(
 
             product.last_seen_at = now
             product.last_checked_at = now
+            product.last_observed_at = item_observed_at
+            product.last_observed_run_id = scrape_run_id
             product.active = True
             product.consecutive_misses = 0
 
@@ -227,12 +254,25 @@ async def detect_changes(
                     stock_status=product.stock_status,
                     image_url=product.image_url,
                     checked_at=now,
+                    observed_at=item_observed_at,
+                    scrape_run_id=scrape_run_id,
                 )
                 session.add(snapshot)
 
-    # Mark products not seen as missing
+    # Absence is evidence only for a complete catalog observation. Partial,
+    # suspicious-empty, and failed acquisitions call with allow_absence=False.
     for product in existing_products:
-        if product.id not in seen_product_ids and product.active:
+        if (
+            allow_absence
+            and product.id not in seen_product_ids
+            and product.active
+            and _is_newer_observation(
+                catalog_observed_at,
+                scrape_run_id,
+                product.last_observed_at,
+                product.last_observed_run_id,
+            )
+        ):
             product.consecutive_misses = (product.consecutive_misses or 0) + 1
             product.last_checked_at = now
             if product.consecutive_misses >= CONSECUTIVE_MISS_THRESHOLD:
@@ -245,10 +285,28 @@ async def detect_changes(
                     new_value=None,
                     event_message=f"Product no longer seen: {product.title}",
                     detected_at=now,
+                    scrape_run_id=scrape_run_id,
                 )
                 session.add(event)
 
     return {"new_products": new_count, "price_changes": price_change_count}
+
+
+def _is_newer_observation(
+    candidate_at: datetime,
+    candidate_run_id: int | None,
+    current_at: datetime | None,
+    current_run_id: int | None,
+) -> bool:
+    if current_at is None or candidate_at > current_at:
+        return True
+    if candidate_at < current_at:
+        return False
+    if candidate_run_id is None:
+        return current_run_id is None
+    if current_run_id is None:
+        return True
+    return candidate_run_id > current_run_id
 
 
 def _prices_differ(old: Optional[Decimal], new: Optional[float]) -> bool:

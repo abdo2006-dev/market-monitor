@@ -4,6 +4,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from sqlalchemy.dialects.postgresql import UUID
+import uuid
 from app.database import Base
 
 
@@ -29,6 +31,42 @@ class Competitor(Base):
     products = relationship("Product", back_populates="competitor", cascade="all, delete-orphan")
     events = relationship("Event", back_populates="competitor", cascade="all, delete-orphan")
     scrape_runs = relationship("ScrapeRun", back_populates="competitor", cascade="all, delete-orphan")
+
+
+class SyncRequest(Base):
+    """A durable user/scheduler intent that groups one or more competitor runs."""
+
+    __tablename__ = "sync_requests"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    trigger = Column(String(50), nullable=False)
+    idempotency_key = Column(String(255), nullable=True, unique=True)
+    requested_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    dispatch_status = Column(String(50), default="not_requested", nullable=False)
+    dispatched_at = Column(DateTime(timezone=True), nullable=True)
+    dispatch_error_category = Column(String(100), nullable=True)
+
+    runs = relationship(
+        "ScrapeRun",
+        secondary="sync_request_runs",
+        back_populates="requests",
+        order_by="ScrapeRun.id",
+    )
+
+
+class SyncRequestRun(Base):
+    __tablename__ = "sync_request_runs"
+
+    request_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("sync_requests.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    scrape_run_id = Column(
+        Integer,
+        ForeignKey("scrape_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
 
 
 class Product(Base):
@@ -63,6 +101,10 @@ class Product(Base):
     first_seen_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     last_seen_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     last_checked_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_observed_at = Column(DateTime(timezone=True), nullable=True)
+    last_observed_run_id = Column(
+        Integer, ForeignKey("scrape_runs.id", ondelete="SET NULL"), nullable=True
+    )
     active = Column(Boolean, default=True, nullable=False, index=True)
     consecutive_misses = Column(Integer, default=0, nullable=False)
 
@@ -83,6 +125,10 @@ class ProductSnapshot(Base):
     stock_status = Column(String(50), default="unknown", nullable=False)
     image_url = Column(String(1000), nullable=True)
     checked_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    observed_at = Column(DateTime(timezone=True), nullable=True)
+    scrape_run_id = Column(
+        Integer, ForeignKey("scrape_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     product = relationship("Product", back_populates="snapshots")
 
@@ -100,6 +146,9 @@ class Event(Base):
     detected_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
     notification_sent = Column(Boolean, default=False, nullable=False)
     notification_sent_at = Column(DateTime(timezone=True), nullable=True)
+    scrape_run_id = Column(
+        Integer, ForeignKey("scrape_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     competitor = relationship("Competitor", back_populates="events")
     product = relationship("Product", back_populates="events")
@@ -107,18 +156,58 @@ class Event(Base):
 
 class ScrapeRun(Base):
     __tablename__ = "scrape_runs"
+    __table_args__ = (
+        Index(
+            "uq_scrape_runs_competitor_non_terminal",
+            "competitor_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('queued', 'running', 'retry_wait') AND trigger <> 'legacy'"
+            ),
+        ),
+        Index("ix_scrape_runs_claimable", "status", "next_attempt_at", "queued_at"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     competitor_id = Column(Integer, ForeignKey("competitors.id", ondelete="CASCADE"), nullable=False, index=True)
-    started_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    queued_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
-    status = Column(String(50), default="running", nullable=False)
+    terminal_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(50), default="queued", nullable=False)
+    trigger = Column(String(50), default="legacy", nullable=False)
+    idempotency_key = Column(String(255), nullable=True, unique=True)
+    acquisition_started_at = Column(DateTime(timezone=True), nullable=True)
+    acquisition_completed_at = Column(DateTime(timezone=True), nullable=True)
+    reconciled_at = Column(DateTime(timezone=True), nullable=True)
+    attempt_count = Column(Integer, default=0, nullable=False)
+    max_attempts = Column(Integer, default=3, nullable=False)
+    next_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    claim_token = Column(UUID(as_uuid=True), nullable=True)
+    claimed_by = Column(String(255), nullable=True)
     products_found = Column(Integer, default=0, nullable=False)
+    pages_fetched = Column(Integer, default=0, nullable=False)
+    request_count = Column(Integer, default=0, nullable=False)
+    page_cap_reached = Column(Boolean, default=False, nullable=False)
+    acquisition_strategy = Column(String(100), nullable=True)
+    completeness = Column(String(50), default="unknown", nullable=False)
+    completeness_reason = Column(String(500), nullable=True)
+    observation_started_at = Column(DateTime(timezone=True), nullable=True)
+    observation_completed_at = Column(DateTime(timezone=True), nullable=True)
+    failure_category = Column(String(100), nullable=True)
     new_products_count = Column(Integer, default=0, nullable=False)
     price_changes_count = Column(Integer, default=0, nullable=False)
     error_message = Column(Text, nullable=True)
 
     competitor = relationship("Competitor", back_populates="scrape_runs")
+    requests = relationship(
+        "SyncRequest", secondary="sync_request_runs", back_populates="runs"
+    )
+    events = relationship("Event", foreign_keys="Event.scrape_run_id")
+    snapshots = relationship("ProductSnapshot", foreign_keys="ProductSnapshot.scrape_run_id")
 
 
 class AppSettings(Base):

@@ -11,6 +11,7 @@ from app.api.search_dashboard_settings import (
     search_router, dashboard_router, settings_router
 )
 from app.api.cron import router as cron_router
+from app.api.sync import router as sync_router
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ app.include_router(search_router)
 app.include_router(dashboard_router)
 app.include_router(settings_router)
 app.include_router(cron_router)
+app.include_router(sync_router)
 
 
 @app.get("/health")

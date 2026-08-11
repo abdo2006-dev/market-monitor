@@ -41,6 +41,9 @@ export interface Product {
   last_seen_at: Timestamp
   /** Freshness anchor. See docs/DAILY_CRITICAL_WORKFLOWS.md §5. */
   last_checked_at: Timestamp
+  /** Actual external observation time and the V2 run that supplied it. */
+  last_observed_at?: Timestamp | null
+  last_observed_run_id?: number | null
   active: boolean
 }
 
@@ -57,7 +60,7 @@ export interface Competitor {
   discord_webhook_url?: string | null
   notes?: string | null
   last_scan_at?: Timestamp | null
-  last_scan_status?: 'success' | 'failed' | null
+  last_scan_status?: 'success' | 'partial' | 'suspicious_empty' | 'failed' | null
   created_at: Timestamp
   updated_at: Timestamp
 }
@@ -163,56 +166,64 @@ export interface BatchCompareSummaryResponse {
 
 // ── Sync ─────────────────────────────────────────────────────────────────────
 
-export interface ScanResult {
-  status: 'success' | 'failed'
-  products_found?: number
-  new_products?: number
-  price_changes?: number
-  error?: string
-}
+export type SyncRunState =
+  | 'queued' | 'running' | 'retry_wait' | 'success' | 'failed'
+  | 'abandoned' | 'stale_skipped'
+export type AcquisitionCompleteness =
+  | 'unknown' | 'complete' | 'partial' | 'suspicious_empty' | 'failed'
 
-/**
- * POST /api/competitors/{id}/scan-now returns ONE OF TWO SHAPES depending on
- * the competitor's scrape_type, and `result` may be null for a scan that never
- * ran (inactive competitor). This union documents the real contract rather than
- * hiding it — see docs/API_CONTRACTS.md §2.1 and ADR 0003, which replaces both
- * shapes with a single durable scan-run response.
- */
-export type ScanNowResponse =
-  | { message: string; result: ScanResult | null; task_id?: undefined }
-  | { message: string; task_id: string; result?: undefined }
-
-/**
- * One entry in the client-side scan-all summary.
- *
- * BUG, CHARACTERISED (found by typing this file in Phase 1A):
- * `status` mixes two different vocabularies. The fan-out assigns
- * 'queued' | 'completed' | 'failed' | 'skipped', but api.ts:55 passes through
- * `result.result?.status` when present, which is a ScanResult status —
- * 'success' | 'failed'. So a successful inline scan yields the literal
- * 'success', which no consumer checks for.
- *
- * It happens to work: Competitors.tsx counts 'failed' and 'queued' explicitly
- * and derives `completed` by subtraction, so 'success' lands in the right
- * bucket by accident. Typed accurately here rather than fixed, because ADR 0003
- * replaces this whole client-side fan-out. Do not rely on the accident.
- */
-export interface ScanAllItem {
+export interface SyncRunStatus {
+  run_id: number
   competitor_id: number
-  name: string
-  status: 'completed' | 'queued' | 'failed' | 'skipped' | 'success'
-  result?: ScanNowResponse
-  error?: string
+  competitor_name?: string | null
+  status: SyncRunState
+  trigger: string
+  queued_at: Timestamp
+  started_at?: Timestamp | null
+  acquisition_started_at?: Timestamp | null
+  acquisition_completed_at?: Timestamp | null
+  reconciled_at?: Timestamp | null
+  terminal_at?: Timestamp | null
+  attempt: number
+  max_attempts: number
+  next_attempt_at?: Timestamp | null
+  lease_expires_at?: Timestamp | null
+  failure_category?: string | null
+  failure_reason?: string | null
+  products_observed: number
+  pages_fetched: number
+  page_cap_reached: boolean
+  acquisition_strategy?: string | null
+  completeness: AcquisitionCompleteness
+  completeness_reason?: string | null
+  duration_seconds?: number | null
 }
 
-export interface ScanAllSummary {
-  message: string
-  total: number
-  completed: number
-  queued: number
-  failed: number
-  items: ScanAllItem[]
+export interface SyncRequestStatus {
+  request_id: string
+  trigger: string
+  status: 'queued' | 'running' | 'retrying' | 'success' | 'partial' | 'failed'
+  requested_at: Timestamp
+  dispatch_status: 'not_requested' | 'dispatched' | 'failed'
+  dispatch_error_category?: string | null
+  runs: SyncRunStatus[]
 }
+
+export interface CompetitorFreshness {
+  competitor_id: number
+  competitor_name: string
+  coverage_complete: boolean
+  last_complete_at?: Timestamp | null
+  latest_partial_at?: Timestamp | null
+  last_failed_at?: Timestamp | null
+  active_run?: SyncRunStatus | null
+}
+
+/** Compatibility alias for callers of the legacy route name. */
+export type ScanNowResponse = SyncRequestStatus
+
+/** Compatibility alias for callers of the legacy scan-all route name. */
+export type ScanAllSummary = SyncRequestStatus
 
 // ── Exports ──────────────────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Literal, Optional
 
 
 class Settings(BaseSettings):
@@ -23,6 +23,16 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
     RUN_SCANS_INLINE: bool = False
+    # Explicit coexistence boundary. V2 uses PostgreSQL durable jobs; "legacy"
+    # retains the pre-Phase-1B.2 Celery/inline pathways for production rollback.
+    SYNC_EXECUTION_MODE: Literal["v2", "legacy"] = "v2"
+    SYNC_MAX_ATTEMPTS: int = 3
+    SYNC_LEASE_SECONDS: int = 600
+    SYNC_DISPATCH_PROVIDER: Literal["none", "github_actions"] = "none"
+    GITHUB_ACTIONS_DISPATCH_TOKEN: Optional[str] = None
+    GITHUB_ACTIONS_REPOSITORY: Optional[str] = None
+    GITHUB_ACTIONS_WORKFLOW: str = "sync-v2.yml"
+    GITHUB_ACTIONS_REF: str = "main"
     CRON_SECRET: Optional[str] = None
     # Startup schema verification (docs/adr/0002). One of: strict | warn | off.
     # "warn" is the deliberate Phase 1A default so that removing the old

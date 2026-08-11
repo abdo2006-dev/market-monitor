@@ -232,6 +232,39 @@ run the schema classifier again. Only after it reports Case A may `DB_SCHEMA_CHE
 be enabled. Do not use the GitHub `stamp-head` action for a B- database, and do not run
 `upgrade` before the explicit duplicate remediation if the audit reports conflicts.
 
+### 2.4 Phase 1B.2 durable lifecycle migration and rollout
+
+Migration `0005_durable_sync_lifecycle` must follow `0004`; it does not replace any
+classification, backup, stamping, or duplicate-remediation step above.
+
+Before upgrading, stop all scan producers/workers and inspect active legacy rows:
+
+```sql
+SELECT competitor_id, array_agg(id ORDER BY id) AS run_ids
+FROM scrape_runs
+WHERE status = 'running'
+GROUP BY competitor_id
+HAVING count(*) > 1;
+```
+
+`0005` refuses to migrate if this returns rows. Confirm no worker owns them and resolve
+each row explicitly; do not bulk-update live work. Then:
+
+1. take/verify a fresh backup and restoration command;
+2. upgrade through `0004`, re-run the duplicate audit, then upgrade to `0005`;
+3. require `alembic current` to show `0005_durable_sync_lifecycle (head)`;
+4. inspect `sync_requests`, `sync_request_runs`, the claimable/non-terminal indexes,
+   lifecycle check constraints, and nullable snapshot/event lineage FKs;
+5. deploy API/UI with `SYNC_EXECUTION_MODE=v2`, `SYNC_DISPATCH_PROVIDER=none`, and
+   `DB_SCHEMA_CHECK=warn`;
+6. configure the GitHub `production-sync` environment and run one manual request UUID;
+7. verify request→claim→terminal status, counts, completeness, lineage, and UI polling;
+8. enable optional dispatch and `DB_SCHEMA_CHECK=strict` only after proof.
+
+Do not put the GitHub token in browser/frontend variables. A dispatch failure should remain
+visible as a queued request; `python -m app.workers.sync_worker --drain` is the local/manual
+recovery path.
+
 ### Create a new migration
 
 ```bash
@@ -314,50 +347,78 @@ Note this scrapes a live site. Use a low `max_pages` and do not loop it.
 
 ---
 
-## 4. Clearing stuck `running` scrape runs
+## 4. Recovering a V2 running lease
 
-A crashed scan leaves a permanent `running` row. Eligibility checks ignore rows older than
-30 minutes, so scanning resumes on its own — but the rows accumulate and skew any query
-over run status. There is no reaper.
+Do not manually fail a V2 row merely because it looks old. Acquisition heartbeats renew
+the lease, and every worker startup/drain calls the recovery use case.
 
 Inspect:
 
 ```sql
-SELECT id, competitor_id, started_at, now() - started_at AS age
-FROM scrape_runs WHERE status = 'running' AND started_at < now() - interval '1 hour';
+SELECT id, competitor_id, status, attempt_count, max_attempts,
+       claimed_by, heartbeat_at, lease_expires_at, now() - heartbeat_at AS heartbeat_age
+FROM scrape_runs
+WHERE status = 'running'
+ORDER BY lease_expires_at;
 ```
 
-Reconcile (after confirming no worker is actually running them):
+Trigger safe recovery after confirming the expected worker is not still acquiring:
 
-```sql
-UPDATE scrape_runs
-SET status = 'failed', finished_at = now(), error_message = 'Abandoned: reconciled manually'
-WHERE status = 'running' AND started_at < now() - interval '1 hour';
+```bash
+cd backend && DATABASE_URL="<target>" .venv/bin/python -m app.workers.sync_worker --once
 ```
+
+Expired rows with attempts left become `retry_wait`; exhausted rows become `abandoned` and
+receive a linked safe failure event. The old token is cleared/fenced. Use direct SQL only
+during a documented incident with a backup and exact row review.
 
 ---
 
-## 5. "I pressed Scan and nothing happened"
+## 5. "I pressed Sync and nothing happened"
 
 Decision path:
 
-1. **What is the competitor's `scrape_type`?**
-   - `shopify_json` or `salla_json` → the scan ran **inline** in the HTTP request. A
-     `scrape_runs` row exists. Go to §3.
-   - anything else → the scan was queued to Celery. Continue.
+1. Confirm `SYNC_EXECUTION_MODE=v2`. The POST should return 202 with a request UUID and a
+   `Location` header. Poll `/api/sync/requests/<uuid>`; acceptance is not completion.
 
-2. **Is a Celery worker running?**
+2. Inspect the request and its runs:
+
+```sql
+SELECT sr.id, sr.competitor_id, sr.status, sr.attempt_count, sr.next_attempt_at,
+       sr.lease_expires_at, sr.completeness, sr.failure_category, sr.error_message
+FROM sync_request_runs srr
+JOIN scrape_runs sr ON sr.id = srr.scrape_run_id
+WHERE srr.request_id = :request_id;
+```
+
+3. If `dispatch_status=failed`, fix server-side GitHub configuration or run a trusted
+   manual drain. Do not recreate/delete the request.
+
+4. If `retry_wait`, compare `next_attempt_at` to database time. GitHub is ephemeral; a
+   later manual/scheduled invocation must claim it. Railway would poll continuously.
+
+5. If queued with `dispatch_status=not_requested`, the dispatcher is intentionally off.
+   Start a local/hosted worker:
+
+```bash
+cd backend && .venv/bin/python -m app.workers.sync_worker --request-id <uuid>
+```
+
+6. If `SYNC_EXECUTION_MODE=legacy`, use the compatibility diagnosis below.
+
+### Legacy-only diagnosis
+
+Is a Celery worker running?
 
 ```bash
 cd backend && .venv/bin/python -m celery -A app.workers.celery_app inspect active
 ```
 
-   - No reply → no worker. On Vercel there is **never** a worker
-     (`docs/DEPLOYMENT.md` §2), so queued scans never run and never will. The API returned
-     a `task_id` regardless. This is risk A-2/A-11, not a misconfiguration you can fix
-     without changing topology.
+   - No reply → no legacy consumer. Switch back to the proven V2 flow or restore the
+     intended legacy worker; do not run both for one request.
 
-3. **Is Redis reachable?** The broker URL is `CELERY_BROKER_URL`.
+Redis reachability matters only to legacy Celery/notification work. The V2 broker is
+PostgreSQL.
 
 ---
 

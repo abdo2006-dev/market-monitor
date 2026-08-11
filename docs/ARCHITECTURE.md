@@ -2,11 +2,11 @@
 
 Two parts:
 
-- **Part A — Risk register**: what is wrong with the current architecture, with source
-  references, concrete failure modes, and severity.
-- **Part B — V2 target architecture**: the modular monolith we are moving toward.
+- **Part A — Phase 0 risk register**: the baseline findings, preserved as historical
+  evidence. Some are resolved; `docs/PROJECT_STATUS.md` is authoritative for current state.
+- **Part B — V2 architecture**: the target plus the implemented Phase 1B.2 Sync slice.
 
-Baseline for both: commit `f346f70`, tag `archive/pre-v2-rearchitecture`.
+Part A baseline: commit `f346f70`, tag `archive/pre-v2-rearchitecture`.
 
 ---
 
@@ -569,12 +569,12 @@ explicit internal boundaries. Rationale and rejected alternatives:
                     │   postgres/  SQLAlchemy repositories     │
                     │   scrapers/  shopify · salla · playwright│
                     │   notifiers/ discord                     │
-                    │   queue/     celery · redis              │
+                    │   dispatch/  optional GitHub Actions     │
                     └──────────────────────────────────────────┘
                                             ▲
                     ┌───────────────────────┴──────────────────┐
-                    │ workers/   Celery entrypoints.           │
-                    │   thin: deserialize → call use case      │
+                    │ workers/   provider-neutral CLI + legacy │
+                    │   thin: claim → call application use case│
                     └──────────────────────────────────────────┘
 ```
 
@@ -607,8 +607,9 @@ makes it unit-testable for the first time.
 **infrastructure/** — Everything that talks to the outside: SQLAlchemy repositories,
 scraper adapters, the Discord notifier, the Celery queue. Each implements a port.
 
-**workers/** — Celery task functions that deserialize arguments, build the dependency
-container, and call a use case. Target: under ten lines each.
+**workers/** — Provider adapters that deserialize safe identifiers, claim durable work,
+and call application use cases. `sync_worker.py` is shared by GitHub Actions, Railway, and
+local execution. Celery entrypoints remain only for rollback and notifications.
 
 ## B-3. Module map (target)
 
@@ -633,10 +634,10 @@ backend/app/
 engine to `domain/market_identity.py`, the Roblox vocabulary to configuration or a
 database table (it is customer data, not code).
 
-## B-4. Authoritative scan lifecycle
+## B-4. Authoritative Sync lifecycle (implemented in Phase 1B.2)
 
-See `docs/SCRAPING_ARCHITECTURE.md` §1 for the full state machine, idempotency, locking,
-retry, and transaction semantics. Summary:
+See `docs/SCRAPING_ARCHITECTURE.md` §2.1 for the full state machine, idempotency,
+completeness, locking, retry, lease, and transaction semantics. Summary:
 
 ```
 HTTP | scheduler | bulk
@@ -644,25 +645,27 @@ HTTP | scheduler | bulk
         ▼
 RequestCompetitorScan
    ├─ pg_advisory_xact_lock(competitor_id)
-   ├─ reject if a non-terminal ScrapeRun exists
-   ├─ INSERT ScrapeRun(status=QUEUED, trigger=…)          [TX]
-   └─ enqueue ProcessCompetitorScan(scrape_run_id)
+   ├─ reuse a non-terminal run or INSERT queued run
+   ├─ associate it with a durable SyncRequest             [TX]
+   └─ optionally dispatch a provider after COMMIT
         │
         ▼
-worker → ProcessCompetitorScan(scrape_run_id)
-   ├─ transition QUEUED → RUNNING                          [TX]
-   ├─ ScraperAdapter.scan(ctx) → list[ProductObservation]   (no session held)
-   ├─ domain.reconcile(existing, observations) → ChangeSet  (pure)
-   └─ apply ChangeSet + events + outbox rows + RUNNING → SUCCEEDED   [ONE TX]
-        │
-        ▼
-DeliverNotifications worker
-   └─ claim outbox (FOR UPDATE SKIP LOCKED) → Notifier.send → mark delivered  [TX]
+worker CLI → claim with FOR UPDATE SKIP LOCKED
+   ├─ queued/retry_wait → running + lease + fencing token [TX, then COMMIT]
+   ├─ acquire catalog → AcquisitionResult                  (no DB TX held)
+   ├─ heartbeat lease while acquisition is active
+   └─ advisory lock + freshness/completeness reconciliation
+      + snapshots/events lineage + terminal state          [ONE TX]
 ```
 
-There is **no** behavioural difference between a scan triggered by the UI, by scan-all, by
-the scheduler, or by cron. The trigger is recorded on the `ScrapeRun`; it does not select
-a code path.
+The database partial unique index enforces one non-terminal V2 run per competitor. UUID
+claim tokens fence an expired owner after lease recovery. `complete` coverage may infer
+absence; `partial`, `suspicious_empty`, and `failed` cannot. Observation completion time,
+then run ID, orders product state independently from request/start/commit timing.
+
+There is no V2 behavioural difference between UI, scan-all, scheduler, or cron. Trigger is
+diagnostic data, not a business-code selector. Notification delivery remains legacy and
+does not participate in Sync success; the outbox is still future work.
 
 ## B-5. What V2 explicitly does not include
 

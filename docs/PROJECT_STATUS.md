@@ -1,295 +1,218 @@
 # Project Status
 
 **Read this first.** This is the handoff file between working sessions. If it is stale,
-fix it as part of your task.
+fix it as part of the task.
 
-_Last updated: 2026-08-11, Phase 1B.1 closeout and topology evidence gate._
-
----
+_Last updated: 2026-08-11, Phase 1B.2 implementation and local verification._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Phase 1B.1 complete** — independently reviewed and checkpointed. ADR 0008 topology is Proposed; Phase 1B.2 not started. |
-| **Phase 1B.1 baseline** | `27017abf17bd5f76447c6f0113e1988d49858d7b` |
-| **Baseline archive** | tag `archive/pre-v2-rearchitecture` → `f346f70`. **Do not move or delete.** |
-| **Phase 0 branch** | `v2/architecture-foundation` @ `07f780b` (unchanged) |
-| **Working branch** | `v2/daily-critical-foundation`, branched from `07f780b` |
-| **`main`** | untouched at `f346f70` |
-| **Tests** | **163 passing** (65 unit + 98 critical-path) |
+| **Current phase** | **Phase 1B.2 complete locally** — durable, observable Sync lifecycle implemented; production migration and proof remain manual. |
+| **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
+| **Working branch** | `v2/durable-sync-lifecycle` |
+| **Migration head** | `0005_durable_sync_lifecycle` |
+| **Archive baseline** | `archive/pre-v2-rearchitecture` → `f346f70`; do not move or delete. |
+| **Production** | Not inspected, migrated, dispatched, or deployed by this phase. |
 
-### Priority reset
+Priority remains: P0 migration safety, P1 Sync, P2 Search, P3 Export, P4 daily-workflow
+UX, then lower-priority features. Treasury Audit remains design-only.
 
-The owner uses three workflows daily and makes real pricing decisions from them. As of
-Phase 1A these are the highest-priority product surface — see
-`docs/DAILY_CRITICAL_WORKFLOWS.md`:
+## 2. Phase 1B.2 outcome
 
-**P0** database/migration safety · **P1** Sync reliability · **P2** Search reliability and
-freshness · **P3** Export reliability and provenance · **P4** UX for those three ·
-*then* everything else · *then* Treasury Audit.
+Sync now has one provider-neutral business lifecycle:
 
----
+```text
+manual / Sync All / Cairo morning trigger
+              |
+              v
+Request*Scan application use case
+              |
+              v
+PostgreSQL SyncRequest + queued ScrapeRun(s) -- optional server dispatch
+              |
+              v
+worker claim (FOR UPDATE SKIP LOCKED + UUID fencing token + lease)
+              |
+              v
+acquisition outside a DB transaction -> AcquisitionResult
+              |
+              v
+competitor advisory lock -> freshness/completeness-aware reconciliation
+              |
+              v
+terminal run, product state, snapshots, and events committed together
+```
 
-## 2. What Phase 1A completed
+The API acknowledges durable requests with HTTP 202. It never reports request acceptance
+or GitHub workflow dispatch as scan success. PostgreSQL owns requests, attempts, leases,
+results, and lineage; GitHub Actions is only the initial execution provider.
 
-### Phase 1B.1 — product integrity and concurrent Sync safety ✅
+### Durable model and state machine
 
-- Defined product identity in `app/domain/product_identity.py`: conservative canonical
-  URL plus a derived product-level external key. Raw URL/external ID remain source data;
-  titles never identify products.
-- Added migration `0004_product_identity_integrity`: non-null canonical URL, partial
-  product identity key, unique database invariants. It fails safely and names affected IDs
-  if duplicate remediation has not happened.
-- Added a read-only duplicate audit and explicit consolidator. Consolidation requires a
-  backup acknowledgement, exact confirmation phrase, and recovery plan outside the repo;
-  it repoints every snapshot/event before removing redundant current-state rows.
-- Added a transaction-scoped PostgreSQL advisory lock after acquisition and before the
-  product read. It covers the complete reconciliation transaction and never spans network
-  or Playwright work.
-- Added scan-start ordering protection based on committed successful `ScrapeRun.started_at`
-  values: an older-started scan cannot overwrite or count misses after a later-started
-  success commits, and failures cannot erase the successful watermark.
-- Added deterministic payload deduplication and one observable retry for named product
-  uniqueness collisions.
-- Inverted the Phase 1A race regression. The unmodified defect reproduced 5/5 before the
-  change; the fixed test now requires exactly one logical product.
-- Added ADR 0007 and 16 regressions covering identity, locking, constraints, ordering,
-  consolidation, and the duplicate → false-removal chain.
+- `sync_requests` groups one or more runs and records optional dispatch state.
+- `sync_request_runs` permits a new request to reference an already-active competitor run.
+- `scrape_runs` records queue, claim, acquisition, observation, reconciliation, retry,
+  terminal, completeness, and safe failure metadata.
+- Execution states are `queued`, `running`, `retry_wait`, `success`, `failed`, `abandoned`,
+  and `stale_skipped`.
+- Acquisition completeness is independent: `unknown`, `complete`, `partial`,
+  `suspicious_empty`, or `failed`.
+- A partial unique PostgreSQL index allows at most one non-terminal V2 run per competitor.
+  Transaction advisory locks make request creation and reconciliation deterministic.
+- Claims use `FOR UPDATE SKIP LOCKED`, commit before external I/O, and carry a UUID fencing
+  token. The worker heartbeats the token's lease. A future worker recovers expired leases
+  to `retry_wait`, or to `abandoned` after the attempt budget is exhausted.
 
-### P0 — Alembic is now the single schema authority ✅
+### Completeness and observation correctness
 
-- Removed `Base.metadata.create_all` and the two raw `ALTER TABLE` statements from
-  application startup (`app/database.py`). Startup now **verifies** the schema and never
-  mutates it.
-- Added migration `0003_reconcile_index_names`, which converges the two historical index
-  naming schemes (`ix_snapshots_*` vs `ix_product_snapshots_*`). Written to be a safe no-op
-  on either starting shape.
-- **Fixed a repo defect: `alembic/script.py.mako` was missing**, so `alembic revision` had
-  never worked — every migration to date was hand-written. Discovered when the CI drift
-  check crashed rather than reporting.
-- **CI drift check promoted from `continue-on-error` to a required gate.** `autogenerate`
-  now produces an empty `upgrade()`, verified against both an Alembic-built and a
-  `create_all`-built database.
-- Added `backend/scripts/check_schema_state.py` — read-only, classifies a database as
-  Case A/A-/B/B-/C/D and never writes.
-- Added `.github/workflows/db-migrate.yml` — **manual-only** production migration. Defaults
-  to read-only `inspect`; write actions require typing `MIGRATE`; `stamp-head` refuses
-  unless the inspector reports Case B.
-- Added `backend/scripts/bootstrap_dev_db.sh` for the development path.
+- Complete, newer catalog coverage may infer absence and increment missing/removal state.
+- Partial/truncated, suspicious-empty, and failed acquisitions never infer absence.
+- Observed items in a partial result may still update when their external observation is
+  newer.
+- A full fifth Shopify page (`5 × 250 = 1,250`) is conservatively `partial`, because a
+  sixth page may exist. Salla/generic adapters also signal a cap when pagination indicates
+  more data.
+- `Product.last_observed_at` and `last_observed_run_id` guard current state. Ordering uses
+  actual acquisition completion time, then run ID as a deterministic equal-time tie-break.
+  An older complete result that arrives later is `stale_skipped`.
+- New snapshots and events carry nullable `scrape_run_id`; historical records are not
+  assigned fabricated lineage.
 
-### Regression coverage ✅
+### Entry-point convergence
 
-98 critical-path tests, real PostgreSQL, deterministic fixtures, **no live network anywhere**:
-
-| Suite | Tests |
+| Original pathway | V2 disposition |
 |---|---|
-| `tests/critical/test_schema_authority.py` | 10 |
-| `tests/critical/test_sync_regression.py` | 32 |
-| `tests/critical/test_product_integrity.py` | 5 |
-| `tests/critical/test_search_regression.py` | 23 |
-| `tests/critical/test_export_regression.py` | 28 |
+| `POST /api/competitors/{id}/scan-now` | Compatibility route delegates to `request_competitor_scan`; legacy inline/Celery code runs only when `SYNC_EXECUTION_MODE=legacy`. |
+| `POST /api/competitors/scan-all` | Compatibility route delegates to one durable grouped request. |
+| `GET /api/cron/scan-due` / `daily` | Creates/reuses the deterministic Cairo-day request and optionally dispatches it; daily summary remains legacy notification work. |
+| Celery `scrape_competitor_task` / beat scheduler | Retained for rollback. V2 disables the every-minute legacy scan scheduler so both systems cannot execute one request. |
+| React `scanAll()` fan-out | Removed. The browser makes one `/api/sync/all` request and polls durable status. |
 
-Harness: `tests/conftest.py`. Database tests **skip** when `TEST_DATABASE_URL` is unset,
-and CI fails if that happens there.
+There is one V2 reconciliation implementation (`application.sync` calling the existing
+detection service). The legacy implementation remains behind the explicit rollback flag
+until production proof is complete.
 
-### Documented, not changed
+## 3. Execution providers
 
-Freshness model (Part D), acquisition boundary (Part G), critical-path contracts (Part H).
-The real benchmark and refreshed topology matrix are now recorded in
-`docs/DAILY_CRITICAL_WORKFLOWS.md` and proposed ADR 0008; no topology was implemented.
+ADR 0008 is Accepted with this staged decision:
 
----
+1. **Initial personal-use deployment:** GitHub Actions + PostgreSQL durable jobs.
+2. **Professional reliability upgrade:** a persistent Railway service running the same
+   `python -m app.workers.sync_worker` CLI and using the same database lifecycle.
 
-## 3. Code changes in Phase 1A
+`.github/workflows/sync-v2.yml` supports a safe request UUID for manual dispatch and two
+off-hour daily recovery schedules. Both scheduled invocations derive the same
+`automatic:<Africa/Cairo date>` request, so the second recovers rather than duplicates.
+The workflow has no PR trigger, checks out trusted `main`, uses the `production-sync`
+environment, pins third-party actions, and grants only `contents: read`.
 
-Phase 1B.1 adds:
+The optional API dispatcher is disabled by default. When enabled, its fine-grained GitHub
+token is server-only and should be limited to this repository with Actions write access.
+A failed dispatch leaves the request durably queued; the next scheduled drain can claim it.
 
-| File/area | Change | Behaviour change? |
-|---|---|---|
-| `app/domain/product_identity.py` | canonical URL, product key, deterministic observation collapse | **Yes, intended** |
-| `services/detection.py` | reconcile by canonical/product keys | **Yes, intended** |
-| `workers/tasks.py` | transaction advisory lock, stale-start guard, named constraint retry | **Yes, intended** |
-| `models` + migration `0004` | database product-identity invariants | schema + integrity |
-| `scripts/audit_product_duplicates.py` | read-only production audit | no writes |
-| `scripts/consolidate_product_duplicates.py` | explicit history-preserving remediation | only with confirmation |
+## 4. API and UI
 
-| File | Change | Behaviour change? |
-|---|---|---|
-| `app/database.py` | `init_db()` → `verify_schema_state()`; no DDL | **Yes, intended** — startup no longer creates schema |
-| `app/main.py` | startup calls verification; logs and re-raises `SchemaStateError` | Yes, intended |
-| `app/config.py` | added `DB_SCHEMA_CHECK` (`strict`/`warn`/`off`, default `warn`) | additive |
-| `alembic/versions/0003_*` | new migration, index-name convergence | schema only, non-destructive |
-| `alembic/script.py.mako` | added missing template | fixes broken tooling |
-| `pyproject.toml` | `[tool.pytest.ini_options]`: `asyncio_mode=auto`, `critical` marker | test-only |
-| `frontend/src/lib/types.ts` | new, hand-written critical-path types | types only |
-| `frontend/src/lib/api.ts` | typed 10 critical-path functions | types only |
-| `MarketSearch.tsx`, `Exports.tsx`, `Competitors.tsx` | removed all `any`; fixed 2 latent nulls | 1 real guard added |
-| `.github/workflows/ci.yml` | drift check now required; critical tests run; skip-detection | CI only |
+New explicit contracts:
 
-**`DB_SCHEMA_CHECK` defaults to `warn` deliberately.** Removing startup `create_all` must
-not take a running deployment down on boot. Flip to `strict` once production is verified
-and stamped (§6).
+- `POST /api/sync/competitors/{id}` → 202 + request aggregate
+- `POST /api/sync/all` → 202 + grouped request aggregate
+- `GET /api/sync/requests/{uuid}`
+- `GET /api/sync/runs/{id}`
+- `GET /api/sync/freshness`
 
----
+The Competitors page shows accepted, queued, running, retrying, success, partial, and
+failed states; per-competitor run details; attempts; safe failures; completeness; observed
+product counts; durations; and last complete coverage. It does not equate 202 with success.
 
-## 4. Test and check status
+Phase 1C can consume `last_complete_at`, `latest_partial_at`, `last_failed_at`,
+`coverage_complete`, active-run status, and per-product `last_observed_at`. Search itself
+has not yet been redesigned or made freshness-aware.
 
-Environment: macOS, `backend/.venv` Python 3.10.4, Node 22.23.1, Docker, PostgreSQL 16 in a
-container. CI runs Python 3.12.
+## 5. Production blockers and staged migration
 
-| Check | Command | Result |
-|---|---|---|
-| Full backend suite | `pytest tests/ -q` (with `TEST_DATABASE_URL`) | **163 passed** |
-| Unit only | `pytest tests/ -q -m "not critical"` | 65 passed |
-| Critical only | `pytest tests/ -q -m critical` | 98 passed |
-| App import | `python -c "from app.main import app"` | pass, 31 routes |
-| Fresh DB migration | `alembic upgrade head` on empty DB | pass |
-| Round-trip | `upgrade → downgrade base → upgrade` | pass |
-| **Drift** | `alembic revision --autogenerate` | **empty upgrade() — no drift** |
-| Case A/A-/B/B-/C/D detection | `scripts/check_schema_state.py` | historical B- path added for safe `0003` stamping |
-| Frontend typecheck | `npx tsc --noEmit` | pass |
-| Frontend build | `npm run build` | pass, 686.98 kB |
-| Frontend lint | `npm run lint` | **still broken** — eslint not installed |
-| Frontend tests | — | still none |
+Production may be unstamped or may not yet contain Phase 1B.1 constraints. Do not deploy
+the worker or set strict schema mode until the owner performs `docs/RUNBOOK.md` §2.2–2.4:
 
-**Not verified in this environment:** anything needing a live Celery worker, Redis, or a
-real Discord webhook. One read-only real acquisition benchmark was run against configured
-competitors; it performed no reconciliation or production writes (§6.2).
+1. read-only classification;
+2. backup and documented restore plan;
+3. exact Case B/B-/C handling (never stamp Case C);
+4. duplicate audit/remediation if required;
+5. upgrade through `0004`, then `0005`;
+6. verify schema, indexes, constraints, and application startup;
+7. configure the `production-sync` environment and server dispatcher if desired;
+8. enable strict schema verification and V2 only after an explicit test request succeeds.
 
----
+Migration `0005` refuses to proceed while overlapping legacy `running` rows exist. Confirm
+that no real worker owns them before resolving them. Its downgrade is implemented, but a
+queued V2 row has no execution start; downgrade truthfully backfills legacy `started_at`
+from `queued_at` before restoring the prior non-null column.
 
-## 5. Known issues
+## 6. Verification status
 
-Phase 0's A-numbered risks remain in `docs/ARCHITECTURE.md`. **A-1 and product-integrity
-parts of A-6/A-7 are now fixed.**
-Phase 1A additionally *proved* several with tests:
+All tests use deterministic fixtures/mocks; no live storefront or production database was
+used.
 
-### Confirmed by reproduction
+| Gate | Result |
+|---|---|
+| Full backend | **192 passed**, 11 pre-existing warnings |
+| Critical path | **127 passed**, 65 deselected |
+| Phase 1B.1 Sync/integrity | **37 passed** |
+| Phase 1B.2 lifecycle | **29 passed**, including 5 claim-race iterations |
+| Fresh / prior-`0004` / downgrade-re-upgrade | all reached `0005` head |
+| Alembic drift | empty generated upgrade/downgrade |
+| Frontend typecheck/build | pass; 943 modules, 687.84 kB main chunk |
+| Startup/workflow | 36 routes with Sync V2; YAML/security assertions pass |
+| Diff/secret safety | pass before commit |
 
-- **Y1/Y2 resolved.** The pre-fix duplicate reproduced deterministically 5/5. Reconciliation
-  is now serialized, database uniqueness is final backstop, and the false-removal chain has
-  a regression test.
-- **E1 — export cached data is indistinguishable from live data.** When the live scrape
-  returns nothing, stored products are served with identical status, headers, filename and
-  field set. The UI calls it a live scrape.
-- **Y3 — price-change thresholds are dead config.** Detection uses a hardcoded 0.001
-  epsilon; a 0.5-cent move on a $500 item fires an event.
-- **Y4 — a degraded scraper manufactures sales signals.** `in_stock → unknown` emits
-  `stock_out`, which is counted as an inferred sale.
-- **S1 — Search has no freshness signal.** A month-old price outranks a minutes-old one
-  purely by being lower.
-- **Y5** `scrape_failed` events are never marked notified. **Y6** inactive competitor
-  returns `{"result": null}` with a success message.
-- **Contract bug** — `ScanAllItem.status` mixes two vocabularies; `'success'` leaks into a
-  field whose consumers check `'completed'`. Works only by subtraction.
+Known pre-existing warnings remain: Pydantic class-based config, FastAPI `on_event`, the
+custom pytest-asyncio loop fixture, and Starlette's multipart import. Frontend lint is not
+an available gate because ESLint is not installed; there are still no frontend unit tests.
 
-### Still open from Phase 0
+## 7. Remaining risks
 
-A-2 (five scan pathways), A-3 (orchestration in React), A-4 (API imports worker internals),
-A-5 (unscoped notifications), A-6 (durable request/run idempotency), A-7 (remaining
-free-text status constraints), A-8 (monolithic scraper),
-A-9, A-10, A-11 (topology), A-12 (observability). `app_settings` still inert. Cron
-endpoints still unauthenticated by default.
-
----
-
-## 6. Current blockers
-
-**Two, both requiring the owner rather than an agent.**
-
-### 6.1 Production database must be classified and stamped
-
-Startup no longer creates schema. The deployed database may still be an unstamped Phase 1A
-shape. The current classifier distinguishes **B-** (matches revision `0003`) from real
-drift. Production must be classified, backed up, audited for duplicates, explicitly
-remediated if necessary, and migrated to `0004` before strict mode:
-
-- `DB_SCHEMA_CHECK=warn` keeps the app running and logs loudly. **Do not set `strict`
-  before this is done** — it would refuse to boot.
-- Migration `0004` must not be marked applied by stamping head.
-
-Procedure: `docs/RUNBOOK.md` §2.2–2.3. Inspect → exact historical stamp if B- → back up →
-read-only duplicate audit → explicit remediation if needed → migrate → verify → strict.
-**Never stamp a Case C database.**
-
-### 6.2 Deployment topology requires owner acceptance (ADR 0008)
-
-The evidence gate is complete. The real sequential acquisition workload was 30.08 s wall
-time for 12 active competitors (1.99 s median, 8.23 s slowest), with no configured browser
-strategy and one empty result. ADR 0008 proposes:
-
-1. primary: one persistent Railway Python worker polling PostgreSQL (~$5/month);
-2. fallback: a public GitHub Actions ephemeral worker ($0, best-effort schedule/latency).
-
-Live Export remains synchronous on Vercel. The owner must choose the cost/reliability
-tradeoff before Phase 1B.2 starts. Celery/Redis migration, durable lifecycle, scan endpoint
-changes, and worker deployment were deliberately not started.
-
----
-
-## 7. Pending migrations
-
-Head is **`0004_product_identity_integrity`**. Fresh upgrade and full round-trip are green.
-Production has not been inspected or migrated — see §6.1.
-
-Migrations later Phase 1B work still needs:
-
-1. `scrape_runs.trigger`, status enum, partial unique index on non-terminal runs.
-2. `events.scrape_run_id`, `product_snapshots.scrape_run_id`.
-3. `outbox_entries`.
-4. `scrape_runs.was_complete` for the PARTIAL freshness state.
-
----
+- GitHub schedules are best-effort and can be delayed or disabled after repository
+  inactivity. Manual runner startup also has queue/setup latency.
+- A manual run that enters `retry_wait` may need a later manual or scheduled invocation;
+  PostgreSQL preserves it, but GitHub Actions is not a persistent poller.
+- Completeness depends on adapter evidence. The fifth-full-page rule is conservative, but
+  a storefront that silently truncates without pagination evidence can still be misread.
+- Notifications remain legacy and are not yet transactional/outbox-backed. Sync success is
+  intentionally independent of Discord delivery.
+- The old scraper remains a multi-platform service; Phase 1B.2 added a contract/telemetry
+  boundary without performing the later adapter refactor.
+- Production database classification/migration and real provider proof are still manual.
 
 ## 8. Next recommended task
 
-**Accept ADR 0008, then Phase 1B.2 — one reliable, observable, durable Sync lifecycle.**
-Converge the five request paths on durable `ScrapeRun` request/process use cases, using the
-selected runner. Do not begin the queue/worker migration until the owner chooses the
-topology. Full sequence: `docs/ROADMAP.md`.
+After production migration and one explicit V2 proof, begin **Phase 1C: make `/search`
+trustworthy, freshness-aware, fast, and polished for daily use.** Do not start it as part
+of this phase.
 
----
+## 9. Decisions not to reverse
 
-## 9. Decisions that must not be unintentionally reversed
+1. Alembic is the only schema authority; startup verifies and never mutates schema.
+2. PostgreSQL is the durable Sync coordination/source-of-truth layer; Redis is not.
+3. Product identity is canonical URL plus derived product key, never title.
+4. Absence inference requires complete, newer catalog coverage.
+5. Actual external observation time orders product state; run start is not freshness.
+6. Claims require a committed lease and fencing token; no transaction spans acquisition.
+7. `DB_SCHEMA_CHECK=warn` remains until production is verified and migrated.
+8. No live network calls in tests or CI and no secrets in logs, fixtures, or docs.
+9. `archive/pre-v2-rearchitecture` must not be changed.
+10. Preserve Git author identity and do not add AI attribution trailers.
 
-1. **Product identity matches on canonical URL and derived product-level identity key,
-   never on title.** Raw Shopify `external_id` includes a variant and is not itself the
-   invariant. See ADR 0007.
-2. **An empty scrape is a failure, not an empty catalogue**
-   (`_should_reject_empty_scrape`). This is what prevents a transient outage from wiping a
-   catalogue. Guarded by `test_empty_scrape_is_a_failure_and_never_deactivates_products`.
-3. **Initial-scan notification suppression** (`tasks.py:110`) — intentional flood control.
-4. **The exports SSRF guard** (`exports.py:203`) — host must equal the competitor's.
-5. **Alembic is the only schema authority.** No `create_all`, no runtime DDL. Guarded by
-   `test_application_startup_never_creates_schema` (AST-based, so prose mentioning
-   `create_all` does not trip it).
-6. **`DB_SCHEMA_CHECK` default stays `warn`** until production is stamped (§6.1).
-7. **`archive/pre-v2-rearchitecture` must never be moved, force-updated, or deleted.**
-8. **No live network requests in tests or CI**, ever.
-9. **No AI co-author attribution**; preserve the Git author identity
-   (`Abdulrahman <abdalrahmanahmad2006@gmail.com>`).
-10. **PostgreSQL is the source of truth.** Redis is a broker and cache only.
-11. **Treasury Audit is design-only.**
-12. **The Search matching algorithm was deliberately not rewritten.** 23 tests characterise
-    it. Change it only with regression evidence.
-
----
-
-## 10. How to run everything
+## 10. Local commands
 
 ```bash
-docker run -d --rm --name mm_pg -e POSTGRES_USER=market -e POSTGRES_PASSWORD=market -e POSTGRES_DB=market_monitor -p 5432:5432 postgres:16-alpine
+cd backend
+TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:5432/market_monitor_test \
+  .venv/bin/python -m pytest tests/ -q
 ```
 
 ```bash
-docker exec mm_pg psql -U market -d postgres -c "CREATE DATABASE market_monitor_test;"
-```
-
-```bash
-cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:5432/market_monitor_test .venv/bin/python -m pytest tests/ -q
-```
-
-```bash
-cd frontend && npx tsc --noEmit && npm run build
+cd frontend
+npx tsc --noEmit
+npm run build
 ```

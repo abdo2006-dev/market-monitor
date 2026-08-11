@@ -45,6 +45,8 @@ requires_db = pytest.mark.skipif(
 
 # Tables truncated between tests, children first.
 _TABLES = [
+    "sync_request_runs",
+    "sync_requests",
     "events",
     "product_snapshots",
     "products",

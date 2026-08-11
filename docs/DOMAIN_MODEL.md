@@ -1,271 +1,197 @@
 # Domain Model
 
-Part 1 describes the persisted model **as it exists today**. Part 2 describes the V2
-target domain, which is a refinement of the same concepts, not a replacement.
-
----
-
-# Part 1 — Current persisted model
-
-Source: `backend/app/models/__init__.py`, `backend/alembic/versions/`.
+Current as of migration `0005_durable_sync_lifecycle`. PostgreSQL is the durable source of
+truth; SQLAlchemy models live in `backend/app/models/__init__.py`.
 
 ## Entity relationships
 
+```text
+SyncRequest n───n ScrapeRun        through SyncRequestRun
+Competitor  1───n ScrapeRun
+Competitor  1───n Product
+Competitor  1───n Event
+ScrapeRun   1───n Event            nullable lineage for legacy history
+ScrapeRun   1───n ProductSnapshot  nullable lineage for legacy history
+Product     1───n ProductSnapshot
+Product     1───n Event
 ```
-Competitor 1───n Product         (ON DELETE CASCADE)
-Competitor 1───n Event           (ON DELETE CASCADE)
-Competitor 1───n ScrapeRun       (ON DELETE CASCADE)
-Product    1───n ProductSnapshot (ON DELETE CASCADE)
-Product    1───n Event           (ON DELETE SET NULL)
-AppSettings  — singleton, id=1, unrelated
-```
 
-`ScrapeRun` has **no relationship to `Event` or `Product`**. This is the structural gap
-behind risk A-5: nothing records which run produced which change.
+## SyncRequest
 
-## Competitor
+A durable user/scheduler intent. One manual competitor request normally contains one run;
+Sync All and the automatic morning request contain one run per active competitor. The
+association is many-to-many because a second request may reuse an already non-terminal
+competitor run without creating duplicate work.
 
-The monitored storefront. Owns its own scan cadence, scraping strategy, and notification
-target.
+| Field | Meaning |
+|---|---|
+| `id` | UUID returned to API clients and accepted by the worker CLI |
+| `trigger` | manual, manual_all, automatic_morning, or compatibility origin |
+| `idempotency_key` | optional unique request key; morning uses the Cairo local date |
+| `requested_at` | durable intent time |
+| `dispatch_status` | `not_requested`, `dispatched`, or `failed` |
+| `dispatched_at` | provider acknowledgement time, not execution time |
+| `dispatch_error_category` | safe server-side dispatch diagnosis |
 
-| Field | Type | Notes |
-|---|---|---|
-| `name` | String(255) | display only |
-| `base_url` | String(500) | origin; also the SSRF allowlist for exports |
-| `category` | String(100) | free text, e.g. "Roblox marketplace" |
-| `active` | Boolean | inactive competitors are skipped by every scan path |
-| `scan_frequency_minutes` | Integer | per-competitor cadence, default 60 |
-| `scrape_type` | String(50) | **unconstrained**; handled values: `shopify_json`, `salla_json`, `generic_selector`, `custom` |
-| `listing_urls` | JSON array | collection/category URLs; meaning varies by `scrape_type` |
-| `selector_config` | JSON object | **untyped grab-bag** — see below |
-| `discord_webhook_url` | String(500) | credential stored in plaintext |
-| `last_scan_at` / `last_scan_status` | | denormalized from the newest `ScrapeRun` |
-
-`selector_config` is the weakest point of the model. It is a schemaless JSON object whose
-keys are read across three modules and mean different things per platform:
-
-- Generic/Playwright: `product_card`, `title`, `price`, `url`, `image`, `stock`,
-  `pagination_next`
-- Shopify: `discover_collections`, `include_all_products`, `prefer_all_products_first`,
-  `prefer_storefront_graphql`, `auto_discover_storefront_graphql`, `collection_handles`,
-  `storefront_graphql{shop_domain, access_token, api_version, max_products}`,
-  `max_sitemap_products`, `sitemap_concurrency`, `request_timeout_seconds`
-- Salla: `platform`, `category_id`, `category_ids`, `category_name`, `per_page`, `source`,
-  `currency`, `locale`
-- Cross-cutting: `allow_empty_catalog`, `max_products`
-
-Nothing validates these. A typo is silently ignored and the scraper falls back to a
-default, so a misconfigured competitor looks like a scraping failure.
-
-## Product
-
-The current known state of one item at one competitor. Mutable — it is overwritten in
-place on every scan.
-
-As of Phase 1B.1, identity is enforced by PostgreSQL and resolved in
-`domain/product_identity.py`. The raw `url` and `external_id` remain source evidence;
-`canonical_url` and nullable `identity_key` are the integrity keys. PostgreSQL guarantees
-one `(competitor_id, canonical_url)` and, where present, one
-`(competitor_id, identity_key)`. Title matching remains deliberately rejected because
-stores reuse short item names.
-
-| Source | Raw external ID | Product-level identity |
-|---|---|---|
-| Shopify `/products.json` | `product_id:variant_id` | product component only |
-| Shopify Storefront GraphQL | `product_id:selected_available_variant_id` | product component only |
-| Shopify sitemap fallback | product + variant where extractable | product component; canonical URL otherwise |
-| Salla | raw product ID | full raw ID |
-| Generic Playwright / custom selectors | `None` | canonical URL only |
-
-Canonical URLs lowercase scheme/host, remove `www.` and default ports, collapse redundant
-slashes/trailing slash, remove fragments and known tracking parameters, and sort all
-remaining query parameters. Unknown query parameters are retained because a generic
-store may identify products in its query string. For configured Shopify scans only,
-`/product/<handle>` and `/products/<handle>` converge. Locale prefixes, unknown redirects,
-and HTTP-versus-HTTPS are intentionally not guessed.
-
-Within one payload, observations sharing either key are one logical product. They are
-collapsed deterministically before matching; conflicts are logged. A database uniqueness
-violation is a named, observable race and receives one fresh reconciliation retry.
-
-Lifecycle: `active=True` on every sighting with `consecutive_misses` reset to 0. A product
-absent from a scan increments `consecutive_misses`; at 3 (`CONSECUTIVE_MISS_THRESHOLD`,
-`detection.py:12`) it flips to `active=False` and emits `product_removed`. There is no
-resurrection path in code — a returning product matches by URL and is set `active=True`
-again, but no `product_returned` event is emitted.
-
-The reconciliation transaction is serialized per competitor with a transaction-scoped
-PostgreSQL advisory lock. Acquisition happens before this transaction. An older-started
-scan that reaches the lock after a later-started scan committed is recorded as successful
-but does not overwrite product state or increment misses. Ordering is established by the
-persisted `(ScrapeRun.started_at, ScrapeRun.id)` ordering and a committed later
-`status='success'`; failed runs do not participate. Phase 1B.2 needs an explicit
-stale/skipped terminal state because the
-current free-text vocabulary still calls the no-op attempt `success`.
-
-## ProductSnapshot
-
-Append-only history of a product's price/stock/title/image at a point in time. Written on
-product creation and thereafter **only when something changed** (`detection.py:183`).
-
-This means snapshots record *changes*, not *observations* — you cannot tell from the
-snapshot table whether a product was checked and found unchanged, or not checked at all.
-`ProductDetail`'s price chart is therefore a change history, not a time series. This is a
-reasonable storage tradeoff but is undocumented and shapes what the data can answer.
-
-`GET /api/products/{id}/history` returns every snapshot, unpaginated and unbounded.
-
-## Event
-
-An observed change worth reporting. The notification unit.
-
-| `event_type` | Emitted at | `old_value` / `new_value` |
-|---|---|---|
-| `new_product` | `detection.py:81` | null / title, category, price, currency, stock, url |
-| `price_increase` | `detection.py:124` | price, currency, category / price, currency, category, diff_amount, diff_percentage |
-| `price_decrease` | same | same |
-| `price_changed` | same, when one side is null | same |
-| `stock_in` | `detection.py:146` | stock_status, category / stock_status, category |
-| `stock_out` | same | same |
-| `product_removed` | `detection.py:203` | url, title, category / null |
-| `scrape_failed` | `tasks.py:142` | null / null, message only |
-
-`old_value`/`new_value` are free-form JSON with **no schema and no versioning**. Consumers
-index them positionally: `events.py:60` reads `new_value["category"]`,
-`notification.py:210` reads `new_value["price"]`. A change to what detection writes
-silently breaks both.
-
-`notification_sent` is the delivery flag. It is set in memory before the transaction
-commits (A-5) and is never set for `scrape_failed` events, which therefore accumulate
-permanently unsent.
-
-Semantically the events table is doing two jobs: it is the **audit log** (what changed)
-and the **delivery queue** (what still needs sending). V2 separates these.
+Dispatch state never determines run state. A failed dispatch leaves queued work intact.
 
 ## ScrapeRun
 
-One execution attempt against one competitor.
+One durable competitor job across bounded attempts. Unlike the legacy model, an attempt is
+not a new row; `attempt_count`, claim token, retry time, and lease record its progress.
 
-Status: `running` (set at creation, `tasks.py:48`) → `success` (`:81`) or `failed`
-(`:135`). There is no queued state, no state machine, and **no reaper** — a process that
-dies mid-scan leaves a permanently `running` row. Eligibility checks work around this with
-a 30-minute cutoff (`api/competitors.py:172`) rather than reconciling the row.
+### Execution state
 
-Counters (`products_found`, `new_products_count`, `price_changes_count`) are written only
-on success. Stock changes and removals are not counted at all.
-
-No `trigger` column, so it is impossible to tell whether a run came from the UI, scan-all,
-cron, or beat. No `scrape_run_id` foreign key on `Event` or `ProductSnapshot`, so a run's
-effects cannot be reconstructed.
-
-## AppSettings
-
-Singleton row (`id=1`) exposed by `GET/PUT /api/settings` and rendered by the Settings
-page. **Read by nothing else in the application.** Its eleven fields duplicate environment
-settings that the scan pipeline reads instead. See `docs/CURRENT_SYSTEM.md` §3 and §5.
-
-## Implicit domain concepts with no table
-
-Concepts the code reasons about that have no persistent representation:
-
-- **Market identity** — `_market_identity` (`search_dashboard_settings.py:692`) computes a
-  `(collection, base, mutation)` triple to decide when two competitors' listings are the
-  same item. Recomputed on every request, never stored, never correctable by a human.
-- **Collection / game taxonomy** — `COLLECTION_ALIASES` and `COLLECTION_LABELS`
-  (`:68-93`) plus a second copy of the same vocabulary in `services/scraper.py:942` and a
-  third in `api/exports.py:170`. This is customer-editable business data living in three
-  source files.
-- **Mutation** — `MUTATION_PHRASES` (`:33-55`), a Roblox-specific item-variant concept
-  (e.g. "Rainbow", "Blood Moon") used to prevent comparing a rare variant against a plain
-  one. Genuine domain knowledge, hardcoded as a tuple.
-- **Inferred sale** — a `stock_out` event reinterpreted as a probable sale
-  (`:26`, `sales-trends`). The endpoint is careful to label this an inference
-  (`:1027`), which is good; the concept itself has no model.
-
----
-
-# Part 2 — V2 target domain
-
-Same concepts, made explicit and testable. Not yet implemented.
-
-## Core entities
-
-**Competitor** — unchanged, plus a validated `ScrapeStrategy` value object replacing the
-free-text `scrape_type` + untyped `selector_config` pair. Each strategy gets a typed
-config model (`ShopifyConfig`, `SallaConfig`, `SelectorConfig`) validated on write, so a
-misconfiguration fails at the API instead of at scan time.
-
-**ProductObservation** — new, the canonical scraper output. A single immutable sighting of
-one item, produced by an adapter and consumed by reconciliation. This is what
-`scrape_competitor`'s untyped `list[dict]` becomes. Definition in
-`docs/SCRAPING_ARCHITECTURE.md` §3.
-
-**Product** — the reconciled current state, as today, plus a real uniqueness rule:
-`UNIQUE (competitor_id, url)` and a partial `UNIQUE (competitor_id, external_id)`.
-
-**ProductSnapshot** — unchanged in shape, gains `scrape_run_id` so history is attributable.
-
-**ScrapeRun** — gains `trigger` (`MANUAL | BULK | SCHEDULED | CRON`) and a real state
-machine:
-
-```
-QUEUED ──► RUNNING ──► SUCCEEDED
-             │  │
-             │  └────► FAILED      (permanent error)
-             │  └────► RETRYING ──► QUEUED   (transient, bounded)
-             └───────► ABANDONED   (reaper: RUNNING past deadline)
+```text
+queued ──claim──> running ──success──> success
+                    │          └─────> stale_skipped
+                    ├─retryable + budget──> retry_wait ──claim──> running
+                    ├─permanent/exhausted─> failed
+                    └─expired final lease─> abandoned
 ```
 
-A partial unique index on `(competitor_id)` where status is non-terminal makes duplicate
-concurrent runs a database error rather than a race.
+`success` means acquisition and reconciliation code completed. It does not by itself mean
+catalog coverage was complete. `stale_skipped` is terminal success of execution with no
+product mutation because a later complete observation already committed.
 
-**Event** — becomes purely an audit record. `notification_sent` moves out.
-Gains `scrape_run_id`. `old_value`/`new_value` become typed payloads per event type with a
-`payload_version` field so consumers can migrate.
+### Acquisition completeness
 
-**OutboxEntry** — new. `(id, event_id, channel, status, attempts, last_error,
-available_at, delivered_at)`. Written in the same transaction as the events it refers to;
-drained by `DeliverNotifications`. This is what fixes A-5.
+| Value | Meaning | May infer absence? |
+|---|---|---:|
+| `unknown` | queued/legacy evidence cannot establish coverage | no |
+| `complete` | adapter reached a trustworthy catalog end | yes, if newer |
+| `partial` | cap/truncation or known incomplete evidence | no |
+| `suspicious_empty` | unexpected zero products | no |
+| `failed` | no usable acquisition result | no reconciliation |
 
-**MarketIdentity** — promoted from a computed triple to a domain value object with an
-optional persisted override table, so a human can correct a bad automatic grouping instead
-of editing `MUTATION_PHRASES` in source.
+This separation answers independently “did the job execute?” and “is absence evidence
+trustworthy?”. Exactly five full 250-item Shopify pages are partial because a sixth page
+may exist.
 
-**CollectionTaxonomy** — the alias/label vocabulary moves out of three source files into
-one owner: either a configuration file or a database table. It is data, and it changes
-when the market changes, not when the code changes.
+### Time vocabulary
 
-## Core domain operation
+| Field | Meaning |
+|---|---|
+| `queued_at` | durable run creation |
+| `started_at` | first successful claim, retained across retries |
+| `claimed_at` | current attempt's claim |
+| `heartbeat_at` / `lease_expires_at` | liveness/recovery evidence |
+| `acquisition_started_at` | external work began |
+| `acquisition_completed_at` | external work ended |
+| `observation_started_at` / `observation_completed_at` | external evidence window; currently matches acquisition window |
+| `reconciled_at` | product decisions were applied |
+| `terminal_at` / `finished_at` | durable terminal outcome |
 
-```python
-def reconcile(
-    existing: Sequence[Product],
-    observations: Sequence[ProductObservation],
-    policy: DetectionPolicy,
-    now: datetime,
-) -> ChangeSet:
-    ...
-```
+Request time and run start do not order prices. `observation_completed_at`, followed by run
+ID for an equal timestamp, orders actual market evidence. Reconciliation commit time is
+operational latency, not freshness.
 
-Pure. No session, no I/O. `ChangeSet` carries products to insert, products to update,
-snapshots to write, and events to emit. This is the current `detect_changes` with
-persistence lifted out — which is what makes the flood-control rule, the
-`consecutive_misses` threshold, and the price-change thresholds testable for the first
-time.
+### Claim, retry, and evidence fields
 
-`DetectionPolicy` is where `MIN_PRICE_CHANGE_AMOUNT`, `MIN_PRICE_CHANGE_PERCENTAGE`, and
-`IGNORE_KEYWORDS` finally become live — they are currently dead configuration
-(`docs/CURRENT_SYSTEM.md` §5), and the Settings page that appears to control them
-currently controls nothing.
+- `claim_token` is a UUID fencing token; `claimed_by` is a bounded non-secret label.
+- `attempt_count`, `max_attempts`, and `next_attempt_at` implement bounded retry/backoff.
+- `products_found`, `pages_fetched`, `request_count`, `page_cap_reached`,
+  `acquisition_strategy`, and `completeness_reason` make acquisition diagnosable.
+- `failure_category` and `error_message` are safe summaries, never raw secret-bearing
+  responses or stack traces.
 
-## Invariants V2 must enforce
+The partial unique index `uq_scrape_runs_competitor_non_terminal` covers V2
+`queued/running/retry_wait` rows. Legacy-trigger rows are excluded so rollback code can
+remain available during the proof period. `ix_scrape_runs_claimable` supports the worker's
+status/retry/queue ordering.
 
-1. A product URL is unique per competitor. *(Database constraint — today: Python dict.)*
-2. At most one non-terminal `ScrapeRun` per competitor. *(Partial unique index — today:
-   an unlocked read.)*
-3. Every `Event` names the `ScrapeRun` that produced it. *(FK — today: impossible.)*
-4. A notification is delivered at most once per outbox entry. *(Idempotency key — today:
-   no guarantee.)*
-5. A product is never deactivated by a failed scan. *(Already holds, via
-   `_should_reject_empty_scrape` — preserve it.)*
-6. Persisted schema equals migration state. *(Alembic-only — today: violated, A-1.)*
+## Competitor
+
+The storefront configuration and a small latest-attempt summary. `last_scan_at` and
+`last_scan_status` remain compatibility fields. Durable freshness is derived from run
+history so a failed/partial attempt cannot erase the last complete observation.
+
+`selector_config` remains an untyped strategy-specific JSON object. Important current
+keys include generic CSS selectors, Shopify discovery/GraphQL settings, Salla pagination,
+`allow_empty_catalog`, and `max_products`. Typed adapter configuration remains future
+work; invalid/unsupported configuration is a safe non-retryable Sync failure where it can
+be identified.
+
+## Product
+
+The mutable current state for one competitor item. Phase 1B.1 identity remains:
+
+- unique `(competitor_id, canonical_url)`;
+- unique `(competitor_id, identity_key)` when the derived product key exists;
+- title is never identity;
+- Shopify variant-changing raw external IDs collapse to a product-level identity.
+
+Phase 1B.2 adds:
+
+- `last_observed_at`: newest accepted external observation time;
+- `last_observed_run_id`: the run that supplied that current evidence.
+
+An observation updates a product only when `(observed_at, scrape_run_id)` is newer than
+the stored pair. A returning product becomes active and resets misses. An unobserved
+product increments misses only during complete, newer catalog coverage and deactivates at
+three consecutive misses. Partial, suspicious-empty, failed, stale, or older coverage does
+not count as absence.
+
+`last_seen_at` and `last_checked_at` remain compatibility timestamps. New freshness work
+should prefer `last_observed_at` for the current market fact and run coverage metadata for
+competitor-wide claims.
+
+## ProductSnapshot
+
+Append-only change history. It is written on product creation and when tracked fields
+change, not for every unchanged observation. `observed_at` records when the external fact
+was obtained; `checked_at` records persistence time. New V2 snapshots carry the actual
+`scrape_run_id`. Historical rows stay null rather than receiving fabricated provenance.
+
+The product-detail chart is therefore a change history, not a dense observation series.
+
+## Event
+
+Append-only business/audit changes: new product, price/stock change, removal, and scrape
+failure. New V2 events carry `scrape_run_id`; terminal runner failure/abandon events also
+name their run. Claim fencing and terminal checks prevent an old/replayed claim from
+emitting duplicate events.
+
+`old_value`/`new_value` remain unversioned JSON. `notification_sent` still mixes audit and
+legacy Discord delivery concerns; an outbox is future work. Notification delivery does
+not participate in the V2 Sync transaction or outcome.
+
+## AcquisitionResult and ProductObservation
+
+`app.domain.acquisition.AcquisitionResult` is an immutable boundary object containing:
+
+- canonical observation dictionaries;
+- strategy and acquisition/observation timestamps;
+- product/page/request counts;
+- completeness and page-cap evidence;
+- safe completeness reason/warnings.
+
+The existing multi-platform scraper remains the adapter implementation and now emits
+telemetry into this contract. Each observation receives server-generated `observed_at` as
+close as practical to acquisition completion. Client timestamps are not accepted.
+
+The fully typed, framework-free `ProductObservation` and pure `reconcile()` target have not
+yet been extracted; `services/detection.py` remains the persistence-aware reconciliation
+implementation. Phase 1B.2 changed its contract in a backward-compatible way to accept
+run lineage, observation time, and absence permission.
+
+## Invariants currently enforced
+
+1. Alembic is the only schema authority.
+2. Product canonical URL and derived identity are unique per competitor.
+3. At most one non-terminal V2 run exists per competitor.
+4. One fencing token owns a running lease; only that token may reconcile.
+5. No database transaction is held across storefront acquisition.
+6. Only complete, newer catalog coverage may infer absence.
+7. Older observations cannot overwrite newer current state.
+8. V2 snapshots/events carry the run that produced them.
+9. Failed acquisition cannot change product missing/removal state.
+10. PostgreSQL, not Redis or GitHub, owns requests, attempts, and outcomes.
+
+## Remaining domain work
+
+- typed strategy configuration and scraper adapter ports;
+- pure reconciliation/ChangeSet extraction;
+- versioned event payloads and a notification outbox;
+- one owner for market identity and collection taxonomy;
+- Search freshness policy/UX (Phase 1C) and Export provenance (Phase 1D).

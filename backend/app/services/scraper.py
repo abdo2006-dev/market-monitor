@@ -51,23 +51,39 @@ def _detect_stock(text: Optional[str]) -> str:
 async def scrape_competitor(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT,
                              page_delay: float = PAGE_DELAY_DEFAULT,
                              headless: bool = True,
-                             user_agent: str = "MarketMonitor/1.0") -> list[dict]:
+                             user_agent: str = "MarketMonitor/1.0",
+                             telemetry: Optional[dict] = None) -> list[dict]:
     """
     Generic Playwright scraper.
     competitor dict must have: base_url, listing_urls, selector_config
     Returns list of product dicts.
     """
     scrape_type = competitor.get("scrape_type", "generic_selector")
+    telemetry = telemetry if telemetry is not None else {}
     listing_urls = competitor.get("listing_urls", [])
     if scrape_type == "salla_json":
-        return await scrape_salla_json(competitor, max_pages=max_pages, user_agent=user_agent)
+        return await scrape_salla_json(
+            competitor, max_pages=max_pages, user_agent=user_agent, telemetry=telemetry
+        )
     if scrape_type == "shopify_json" or (scrape_type == "generic_selector" and not listing_urls):
-        return await scrape_shopify_json(competitor, max_pages=max_pages, user_agent=user_agent)
+        return await scrape_shopify_json(
+            competitor, max_pages=max_pages, user_agent=user_agent, telemetry=telemetry
+        )
+
+    telemetry.update(
+        strategy="generic_playwright", pages_fetched=0, request_count=0,
+        page_cap_reached=False,
+    )
 
     try:
         from playwright.async_api import async_playwright
     except ImportError:
         logger.error("Playwright not installed")
+        telemetry.update(
+            failure_category="invalid_configuration",
+            failure_message="Browser acquisition is unavailable on this runner",
+            failure_retryable=False,
+        )
         return []
 
     selector_config = competitor.get("selector_config", {})
@@ -91,11 +107,18 @@ async def scrape_competitor(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
                 try:
                     logger.info(f"Scraping: {current_url}")
                     await page.goto(current_url, wait_until="domcontentloaded")
+                    telemetry["request_count"] += 1
+                    telemetry["pages_fetched"] += 1
                     await asyncio.sleep(page_delay)
 
                     product_card_sel = selector_config.get("product_card", "")
                     if not product_card_sel:
                         logger.warning("No product_card selector configured")
+                        telemetry.update(
+                            failure_category="invalid_configuration",
+                            failure_message="Generic scraper product selector is missing",
+                            failure_retryable=False,
+                        )
                         break
 
                     cards = await page.query_selector_all(product_card_sel)
@@ -122,12 +145,19 @@ async def scrape_competitor(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
 
                     current_url = next_url
                     page_num += 1
+                    if current_url and page_num >= max_pages:
+                        telemetry["page_cap_reached"] = True
 
                     if current_url:
                         await asyncio.sleep(page_delay)
 
                 except Exception as e:
                     logger.error(f"Error scraping {current_url}: {e}")
+                    telemetry.update(
+                        failure_category="temporary_network",
+                        failure_message="Browser catalog request failed",
+                        failure_retryable=True,
+                    )
                     break
 
         await browser.close()
@@ -136,7 +166,8 @@ async def scrape_competitor(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
 
 
 async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT,
-                              user_agent: str = "MarketMonitor/1.0") -> list[dict]:
+                              user_agent: str = "MarketMonitor/1.0",
+                              telemetry: Optional[dict] = None) -> list[dict]:
     """Scrape Shopify catalogs, preserving collection names as categories."""
     import aiohttp
 
@@ -145,6 +176,8 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
     listing_urls = competitor.get("listing_urls") or []
     headers = {"User-Agent": _shopify_user_agent(user_agent), "Accept": "application/json, text/html;q=0.9"}
     all_products = []
+    telemetry = telemetry if telemetry is not None else {}
+    telemetry.update(pages_fetched=0, request_count=0, page_cap_reached=False)
 
     timeout_seconds = selector_config.get("request_timeout_seconds", 30)
     connector = _aiohttp_connector(aiohttp)
@@ -154,8 +187,11 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
         connector=connector,
     ) as session:
         if selector_config.get("prefer_storefront_graphql"):
-            all_products = await _scrape_shopify_storefront_graphql(session, base_url, selector_config)
+            all_products = await _scrape_shopify_storefront_graphql(
+                session, base_url, selector_config, telemetry=telemetry
+            )
             if all_products:
+                telemetry["strategy"] = "shopify_storefront_graphql"
                 return all_products
 
         if selector_config.get("include_all_products", True) and selector_config.get("prefer_all_products_first", True):
@@ -165,6 +201,7 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
                 [{"url": f"{base_url}/products.json", "category": None}],
                 max_pages,
                 user_agent=user_agent,
+                telemetry=telemetry,
             )
             if all_products:
                 return all_products
@@ -176,14 +213,19 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
         if not targets:
             targets = [{"url": f"{base_url}/products.json", "category": None}]
 
-        all_products = await _scrape_shopify_json_targets(session, base_url, targets, max_pages, user_agent=user_agent)
+        all_products = await _scrape_shopify_json_targets(
+            session, base_url, targets, max_pages, user_agent=user_agent,
+            telemetry=telemetry,
+        )
 
         if not all_products:
+            _clear_failure_telemetry(telemetry)
             all_products = await _scrape_custom_storefront_fallback(
                 session,
                 base_url,
                 selector_config,
                 max_pages=max_pages,
+                telemetry=telemetry,
             )
 
     return all_products
@@ -195,32 +237,70 @@ async def _scrape_shopify_json_targets(
     targets: list[dict],
     max_pages: int,
     user_agent: str = DEFAULT_BROWSER_USER_AGENT,
+    telemetry: Optional[dict] = None,
 ) -> list[dict]:
-    all_products = await _scrape_shopify_json_targets_aiohttp(session, base_url, targets, max_pages)
+    all_products = await _scrape_shopify_json_targets_aiohttp(
+        session, base_url, targets, max_pages, telemetry=telemetry
+    )
     if all_products:
+        if telemetry is not None:
+            telemetry["strategy"] = "shopify_products_json_aiohttp"
         return all_products
-    return await _scrape_shopify_json_targets_httpx(base_url, targets, max_pages, user_agent=user_agent)
+    if telemetry is not None:
+        _clear_failure_telemetry(telemetry)
+    result = await _scrape_shopify_json_targets_httpx(
+        base_url, targets, max_pages, user_agent=user_agent, telemetry=telemetry
+    )
+    if result and telemetry is not None:
+        telemetry["strategy"] = "shopify_products_json_httpx"
+    return result
 
 
-async def _scrape_shopify_json_targets_aiohttp(session, base_url: str, targets: list[dict], max_pages: int) -> list[dict]:
+def _clear_failure_telemetry(telemetry: dict) -> None:
+    for key in ("failure_category", "failure_message", "failure_retryable"):
+        telemetry.pop(key, None)
+
+
+async def _scrape_shopify_json_targets_aiohttp(
+    session, base_url: str, targets: list[dict], max_pages: int,
+    telemetry: Optional[dict] = None,
+) -> list[dict]:
     all_products = []
     seen_urls = set()
     for target in targets:
         for page_num in range(1, max_pages + 1):
             url = f"{target['url']}{'&' if '?' in target['url'] else '?'}limit=250&page={page_num}"
             try:
+                if telemetry is not None:
+                    telemetry["request_count"] = telemetry.get("request_count", 0) + 1
                 async with session.get(url) as resp:
                     if resp.status >= 400:
                         logger.warning("Shopify JSON returned %s for %s", resp.status, url)
+                        if telemetry is not None:
+                            telemetry.update(
+                                failure_category=("rate_limited" if resp.status == 429 else "temporary_network" if resp.status >= 500 else "acquisition_error"),
+                                failure_message="Shopify catalog request was rejected",
+                                failure_retryable=resp.status == 429 or resp.status >= 500,
+                            )
                         break
                     data = await resp.json(content_type=None)
             except Exception as e:
                 logger.warning("Could not fetch Shopify JSON %s: %s", url, e)
+                if telemetry is not None:
+                    telemetry.update(
+                        failure_category="temporary_network",
+                        failure_message="Shopify catalog request failed",
+                        failure_retryable=True,
+                    )
                 break
 
             products = data.get("products") or []
             if not products:
                 break
+            if telemetry is not None:
+                telemetry["pages_fetched"] = telemetry.get("pages_fetched", 0) + 1
+                if page_num == max_pages and len(products) == 250:
+                    telemetry["page_cap_reached"] = True
 
             for raw in products:
                 product = _extract_shopify_product(raw, base_url, target.get("category"))
@@ -235,6 +315,7 @@ async def _scrape_shopify_json_targets_httpx(
     targets: list[dict],
     max_pages: int,
     user_agent: str = DEFAULT_BROWSER_USER_AGENT,
+    telemetry: Optional[dict] = None,
 ) -> list[dict]:
     import httpx
 
@@ -253,18 +334,36 @@ async def _scrape_shopify_json_targets_httpx(
             for page_num in range(1, max_pages + 1):
                 url = f"{target['url']}{'&' if '?' in target['url'] else '?'}limit=250&page={page_num}"
                 try:
+                    if telemetry is not None:
+                        telemetry["request_count"] = telemetry.get("request_count", 0) + 1
                     resp = await client.get(url, headers={"Referer": referer})
                     if resp.status_code >= 400:
                         logger.warning("Shopify HTTPX JSON returned %s for %s", resp.status_code, url)
+                        if telemetry is not None:
+                            telemetry.update(
+                                failure_category=("rate_limited" if resp.status_code == 429 else "temporary_network" if resp.status_code >= 500 else "acquisition_error"),
+                                failure_message="Shopify catalog request was rejected",
+                                failure_retryable=resp.status_code == 429 or resp.status_code >= 500,
+                            )
                         break
                     data = resp.json()
                 except Exception as e:
                     logger.warning("Could not fetch Shopify HTTPX JSON %s: %s", url, e)
+                    if telemetry is not None:
+                        telemetry.update(
+                            failure_category="temporary_network",
+                            failure_message="Shopify catalog request failed",
+                            failure_retryable=True,
+                        )
                     break
 
                 products = data.get("products") or []
                 if not products:
                     break
+                if telemetry is not None:
+                    telemetry["pages_fetched"] = telemetry.get("pages_fetched", 0) + 1
+                    if page_num == max_pages and len(products) == 250:
+                        telemetry["page_cap_reached"] = True
 
                 for raw in products:
                     product = _extract_shopify_product(raw, base_url, target.get("category"))
@@ -282,7 +381,8 @@ def _shopify_user_agent(user_agent: Optional[str]) -> str:
 
 
 async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT,
-                            user_agent: str = "MarketMonitor/1.0") -> list[dict]:
+                            user_agent: str = "MarketMonitor/1.0",
+                            telemetry: Optional[dict] = None) -> list[dict]:
     """Scrape Salla storefront category product APIs."""
     import aiohttp
 
@@ -301,6 +401,11 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
     category_ids = _salla_category_ids(selector_config, listing_urls)
     headers["Cookie"] = f"s-curr={currency}"
     all_products = []
+    telemetry = telemetry if telemetry is not None else {}
+    telemetry.update(
+        strategy="salla_json", pages_fetched=0, request_count=0,
+        page_cap_reached=False,
+    )
     seen = set()
 
     connector = _aiohttp_connector(aiohttp)
@@ -313,6 +418,11 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
             category_ids = await _discover_salla_category_ids(session, listing_urls, base_url)
         if not category_ids:
             logger.warning("No Salla category id found for %s", base_url)
+            telemetry.update(
+                failure_category="invalid_configuration",
+                failure_message="Salla category configuration could not be resolved",
+                failure_retryable=False,
+            )
             return []
 
         for category_id in category_ids:
@@ -320,20 +430,32 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
             next_url = _salla_products_api_url(base_url, locale, source, category_id, per_page, currency)
             category_name = selector_config.get("category_name")
 
-            for _ in range(max_pages):
+            for page_index in range(max_pages):
                 try:
+                    telemetry["request_count"] += 1
                     async with session.get(next_url) as resp:
                         if resp.status >= 400:
                             logger.warning("Salla JSON returned %s for %s", resp.status, next_url)
+                            telemetry.update(
+                                failure_category=("rate_limited" if resp.status == 429 else "temporary_network" if resp.status >= 500 else "acquisition_error"),
+                                failure_message="Salla catalog request was rejected",
+                                failure_retryable=resp.status == 429 or resp.status >= 500,
+                            )
                             break
                         data = await resp.json(content_type=None)
                 except Exception as e:
                     logger.warning("Could not fetch Salla JSON %s: %s", next_url, e)
+                    telemetry.update(
+                        failure_category="temporary_network",
+                        failure_message="Salla catalog request failed",
+                        failure_retryable=True,
+                    )
                     break
 
                 raw_products = data.get("data") or []
                 if not raw_products:
                     break
+                telemetry["pages_fetched"] += 1
 
                 for raw in raw_products:
                     product = _extract_salla_product(raw, base_url, category_name, currency)
@@ -348,6 +470,8 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
                 if not next_url:
                     break
                 next_url = _localize_salla_api_url(next_url, locale, currency)
+                if page_index + 1 == max_pages:
+                    telemetry["page_cap_reached"] = True
 
     return all_products
 
@@ -360,16 +484,24 @@ def _aiohttp_connector(aiohttp):
     return aiohttp.TCPConnector(ssl=ssl.create_default_context(cafile=certifi.where()))
 
 
-async def _scrape_custom_storefront_fallback(session, base_url: str, selector_config: dict,
-                                             max_pages: int = MAX_PAGES_DEFAULT) -> list[dict]:
+async def _scrape_custom_storefront_fallback(
+    session, base_url: str, selector_config: dict,
+    max_pages: int = MAX_PAGES_DEFAULT, telemetry: Optional[dict] = None,
+) -> list[dict]:
     """Fallback for Shopify-backed custom storefronts that hide products.json."""
-    products = await _scrape_shopify_storefront_graphql(session, base_url, selector_config)
+    products = await _scrape_shopify_storefront_graphql(
+        session, base_url, selector_config, telemetry=telemetry
+    )
     if products:
         return products
-    return await _scrape_sitemap_product_pages(session, base_url, selector_config, max_pages=max_pages)
+    return await _scrape_sitemap_product_pages(
+        session, base_url, selector_config, max_pages=max_pages, telemetry=telemetry
+    )
 
 
-async def _scrape_shopify_storefront_graphql(session, base_url: str, selector_config: dict) -> list[dict]:
+async def _scrape_shopify_storefront_graphql(
+    session, base_url: str, selector_config: dict, telemetry: Optional[dict] = None
+) -> list[dict]:
     config = await _storefront_graphql_config(session, base_url, selector_config)
     if not config:
         return []
@@ -394,17 +526,41 @@ async def _scrape_shopify_storefront_graphql(session, base_url: str, selector_co
                 "variables": {"handle": handle, "first": first, "after": after},
             }
             try:
+                if telemetry is not None:
+                    telemetry["request_count"] = telemetry.get("request_count", 0) + 1
                 async with session.post(endpoint, json=payload, headers=headers) as resp:
                     if resp.status >= 400:
                         logger.warning("Storefront GraphQL returned %s for %s", resp.status, base_url)
+                        if telemetry is not None:
+                            telemetry.update(
+                                failure_category=(
+                                    "rate_limited" if resp.status == 429
+                                    else "temporary_network" if resp.status >= 500
+                                    else "acquisition_error"
+                                ),
+                                failure_message="Storefront GraphQL request was rejected",
+                                failure_retryable=resp.status == 429 or resp.status >= 500,
+                            )
                         return products
                     data = await resp.json(content_type=None)
             except Exception as e:
                 logger.warning("Could not fetch Storefront GraphQL for %s: %s", base_url, e)
+                if telemetry is not None:
+                    telemetry.update(
+                        failure_category="temporary_network",
+                        failure_message="Storefront GraphQL request failed",
+                        failure_retryable=True,
+                    )
                 return products
 
             if data.get("errors"):
                 logger.warning("Storefront GraphQL errors for %s: %s", base_url, data["errors"])
+                if telemetry is not None:
+                    telemetry.update(
+                        failure_category="acquisition_error",
+                        failure_message="Storefront GraphQL returned invalid catalog data",
+                        failure_retryable=False,
+                    )
                 return products
 
             collection = (data.get("data") or {}).get("collection") or {}
@@ -413,6 +569,9 @@ async def _scrape_shopify_storefront_graphql(session, base_url: str, selector_co
             page_info = (collection.get("products") or {}).get("pageInfo") or {}
             if not product_edges:
                 break
+            if telemetry is not None:
+                telemetry["strategy"] = "shopify_storefront_graphql"
+                telemetry["pages_fetched"] = telemetry.get("pages_fetched", 0) + 1
 
             for edge in product_edges:
                 product = _extract_storefront_product(edge.get("node") or {}, base_url, category)
@@ -423,6 +582,10 @@ async def _scrape_shopify_storefront_graphql(session, base_url: str, selector_co
 
             remaining -= len(product_edges)
             if not page_info.get("hasNextPage"):
+                break
+            if remaining <= 0:
+                if telemetry is not None:
+                    telemetry["page_cap_reached"] = True
                 break
             after = page_info.get("endCursor")
             if not after:
@@ -668,12 +831,18 @@ def _extract_storefront_product(raw: dict, base_url: str, category: Optional[str
     }
 
 
-async def _scrape_sitemap_product_pages(session, base_url: str, selector_config: dict,
-                                        max_pages: int = MAX_PAGES_DEFAULT) -> list[dict]:
+async def _scrape_sitemap_product_pages(
+    session, base_url: str, selector_config: dict,
+    max_pages: int = MAX_PAGES_DEFAULT, telemetry: Optional[dict] = None,
+) -> list[dict]:
     max_products = int(selector_config.get("max_sitemap_products") or max(max_pages * 250, 250))
     product_urls = await _product_urls_from_sitemap_url(session, f"{base_url}/sitemap.xml", base_url, max_products)
     if not product_urls:
         return []
+    if telemetry is not None:
+        telemetry["strategy"] = "shopify_sitemap_product_pages"
+        telemetry["page_cap_reached"] = len(product_urls) >= max_products
+        telemetry["request_count"] = telemetry.get("request_count", 0) + len(product_urls)
 
     semaphore = asyncio.Semaphore(int(selector_config.get("sitemap_concurrency") or 10))
 
@@ -697,6 +866,8 @@ async def _scrape_sitemap_product_pages(session, base_url: str, selector_config:
         if product and key not in seen:
             seen.add(key)
             products.append(product)
+    if telemetry is not None:
+        telemetry["pages_fetched"] = telemetry.get("pages_fetched", 0) + len(products)
     return products
 
 
