@@ -203,6 +203,15 @@ the inline dispatch is removed.
 
 ## A-6. No idempotency and no locking; duplicate concurrent scans are possible — **High**
 
+**Phase 1B.1 status:** Product reconciliation is resolved. A transaction-scoped PostgreSQL
+advisory lock is acquired after acquisition and before the product read; it covers the
+complete read/decide/write region. Older-started observations cannot overwrite a
+later-started committed successful scan. The ordering watermark is the persisted
+`(ScrapeRun.started_at, ScrapeRun.id)`, not the mutable competitor status; failed attempts
+do not affect it. Durable request/run deduplication and the non-terminal
+`ScrapeRun` state machine remain open for Phase 1B.2, so two overlapping attempts are
+still recorded and both may perform network acquisition.
+
 **Files** `api/competitors.py:171-182`, `api/cron.py:37-47`, `workers/tasks.py:189-199`
 
 All three implement the same read-then-act check:
@@ -237,6 +246,13 @@ two non-terminal runs per competitor.
 ---
 
 ## A-7. Missing database constraints; product identity is enforced in Python only — **High**
+
+**Phase 1B.1 status: Resolved for product identity.** Migration `0004` adds a unique
+`(competitor_id, canonical_url)` constraint and partial unique
+`(competitor_id, identity_key)` index. Raw Shopify `external_id` is not constrained
+because its variant component is unstable; the derived key is product-level. Existing
+duplicates require the explicit audited consolidator before the migration will proceed.
+Free-text status/check constraints listed below remain future work.
 
 **Files** `models/__init__.py:34-57`, `services/detection.py:225-246`,
 `alembic/versions/0001_initial.py`

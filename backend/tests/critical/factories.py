@@ -71,15 +71,19 @@ async def make_product(
     image_url: Optional[str] = None,
 ) -> Product:
     from app.utils.text_normalizer import normalize_title
+    from app.domain.product_identity import canonicalize_product_url, product_identity_key
 
     checked = last_checked_at or NOW
+    product_url = url or f"{competitor.base_url}/products/{normalize_title(title).replace(' ', '-')}"
     product = Product(
         competitor_id=competitor.id,
         external_id=external_id,
         title=title,
         normalized_title=normalize_title(title),
         category=category,
-        url=url or f"{competitor.base_url}/products/{normalize_title(title).replace(' ', '-')}",
+        url=product_url,
+        canonical_url=canonicalize_product_url(product_url, competitor.scrape_type),
+        identity_key=product_identity_key(external_id),
         image_url=image_url,
         current_price=Decimal(str(price)) if price is not None else None,
         currency=currency,

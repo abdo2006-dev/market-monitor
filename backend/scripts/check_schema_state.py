@@ -13,14 +13,16 @@ report.
 Cases:
     A  Managed by Alembic and at head. Nothing to do.
     A- Managed by Alembic but behind head. Run `alembic upgrade head`.
-    B  Schema structurally matches the expected model, but alembic_version is
+    B  Schema structurally matches the current model, but alembic_version is
        missing. This is what `Base.metadata.create_all` produces. Safe to stamp
        AFTER taking a backup.
+    B- Schema is unstamped and matches the Phase 1A head (0003). Back up, then
+       stamp exactly 0003 so later migrations are not skipped.
     C  Real drift: tables or columns are missing or unexpected. DO NOT STAMP.
        Requires manual inspection.
     D  Empty database. Run `alembic upgrade head` to create it.
 
-Exit codes: 0 = A (at head), 10 = A- (behind), 20 = B, 30 = C, 40 = D, 1 = error.
+Exit codes: 0 = A, 10 = A-, 20 = B, 21 = B-, 30 = C, 40 = D, 1 = error.
 """
 from __future__ import annotations
 
@@ -42,6 +44,7 @@ import app.models  # noqa: F401,E402  (registers the tables on Base.metadata)
 EXIT_AT_HEAD = 0
 EXIT_BEHIND = 10
 EXIT_UNSTAMPED = 20
+EXIT_UNSTAMPED_HISTORICAL = 21
 EXIT_DRIFT = 30
 EXIT_EMPTY = 40
 
@@ -108,6 +111,10 @@ async def inspect_database() -> dict:
 
     head = _alembic_head()
     structurally_matches = not missing_tables and not missing_columns
+    phase_1a_missing = missing_columns == {
+        "products": ["canonical_url", "identity_key"]
+    }
+    matches_phase_1a = not missing_tables and phase_1a_missing
 
     if not app_tables:
         case, action = "D", "Empty database. Run: alembic upgrade head"
@@ -125,6 +132,13 @@ async def inspect_database() -> dict:
             "(built by create_all). BACK UP FIRST, then: "
             f"alembic stamp {head or '<head>'}"
         )
+    elif matches_phase_1a:
+        case = "B-"
+        action = (
+            "Schema matches Phase 1A revision 0003 but is unstamped. BACK UP FIRST, "
+            "then run: alembic stamp 0003_reconcile_index_names. Do NOT stamp head; "
+            "that would skip the product-integrity migration."
+        )
     else:
         case = "C"
         action = (
@@ -133,7 +147,7 @@ async def inspect_database() -> dict:
         )
 
     # Extra columns alone do not prevent stamping, but they must be reported.
-    if case == "B" and unexpected_columns:
+    if case in {"B", "B-"} and unexpected_columns:
         action += (
             "  NOTE: unexpected extra columns were found; review them before stamping."
         )
@@ -178,7 +192,7 @@ def _print_report(report: dict) -> None:
     print(f"  CASE {report['case']}")
     print(f"  {report['action']}")
     print("=" * 68)
-    if report["case"] in {"B", "C"}:
+    if report["case"] in {"B", "B-", "C"}:
         print("  Take a backup before any remediation:")
         print("    pg_dump \"$DATABASE_URL\" > backup-$(date +%F-%H%M).sql")
         print("=" * 68)
@@ -211,6 +225,7 @@ async def _main() -> int:
         "A": EXIT_AT_HEAD,
         "A-": EXIT_BEHIND,
         "B": EXIT_UNSTAMPED,
+        "B-": EXIT_UNSTAMPED_HISTORICAL,
         "C": EXIT_DRIFT,
         "D": EXIT_EMPTY,
     }[report["case"]]

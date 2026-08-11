@@ -1,7 +1,7 @@
 # ADR 0006 — Background job execution and reliable notification delivery
 
 **Status:** Partially accepted — the delivery mechanism is **Accepted**; the deployment
-topology is **Open** and must be decided before Phase 1 scan work begins.
+topology proposal continues in ADR 0008.
 
 ## Context
 
@@ -107,7 +107,11 @@ off `Event` is a breaking change for anything reading it (currently only
 occasionally see a duplicate message, and that expectation must be documented rather than
 denied.
 
-## Decision — part 2: execution topology (OPEN)
+## Decision — part 2: execution topology (continued by ADR 0008)
+
+> This section is the Phase 0, pre-benchmark analysis. ADR 0008 contains the measured
+> 2026-08-11 workload, refreshed provider facts, and current Proposed decision. Preserve
+> this section as the historical reasoning; do not use it as current operational advice.
 
 **Still not decided as of Phase 1A.** Phase 1A added the evidence-gathering tool
 (`backend/scripts/benchmark_scan.py`) but the owner has not yet run it against their real

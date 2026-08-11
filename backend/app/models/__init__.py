@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, Boolean, Numeric, JSON,
-    DateTime, ForeignKey, Text, Float
+    DateTime, ForeignKey, Text, Float, Index, UniqueConstraint, text
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -33,6 +33,18 @@ class Competitor(Base):
 
 class Product(Base):
     __tablename__ = "products"
+    __table_args__ = (
+        UniqueConstraint(
+            "competitor_id", "canonical_url",
+            name="uq_products_competitor_canonical_url",
+        ),
+        Index(
+            "uq_products_competitor_identity_key",
+            "competitor_id", "identity_key",
+            unique=True,
+            postgresql_where=text("identity_key IS NOT NULL"),
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     competitor_id = Column(Integer, ForeignKey("competitors.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -41,6 +53,8 @@ class Product(Base):
     normalized_title = Column(String(500), nullable=False, index=True)
     category = Column(String(100), nullable=True, index=True)
     url = Column(String(1000), nullable=False, index=True)
+    canonical_url = Column(String(1000), nullable=False)
+    identity_key = Column(String(320), nullable=True)
     image_url = Column(String(1000), nullable=True)
     current_price = Column(Numeric(12, 2), nullable=True)
     currency = Column(String(10), default="USD", nullable=False)

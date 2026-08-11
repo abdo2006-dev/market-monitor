@@ -68,7 +68,7 @@ simply run `upgrade head`, it will fail.
 cd backend && .venv/bin/python -m alembic upgrade head
 ```
 
-### 2.2 Classifying and repairing a database (Cases A / B / C / D)
+### 2.2 Classifying and repairing a database (Cases A / A- / B / B- / C / D)
 
 Since Phase 1A the application no longer creates schema at startup. Alembic is the sole
 authority (`docs/adr/0002`). Before touching any database, **classify it**. Never stamp
@@ -87,12 +87,13 @@ This script only reads catalog metadata. It emits a case and an exit code:
 | **A** | 0 | Managed by Alembic, at head | Nothing to do |
 | **A-** | 10 | Managed by Alembic, behind head | `alembic upgrade head` |
 | **B** | 20 | Schema structurally matches the models, but no `alembic_version` stamp | Backup, then stamp — Step 3 |
+| **B-** | 21 | Unstamped schema matches Phase 1A revision `0003` | Backup, stamp **exactly `0003`**, then continue below |
 | **C** | 30 | **Real drift**: tables or columns missing/unexpected | **Do NOT stamp** — Step 4 |
 | **D** | 40 | Empty database | `alembic upgrade head` |
 
 #### Step 2 — Back up before anything that writes
 
-Non-negotiable for Cases B and C.
+Non-negotiable for Cases B, B-, and C.
 
 ```bash
 pg_dump "$DATABASE_URL" > backup-$(date +%F-%H%M).sql
@@ -123,6 +124,19 @@ cd backend && DATABASE_URL="<target>" .venv/bin/python scripts/check_schema_stat
 
 Expect Case A.
 
+#### Step 3A — Case B-: unstamped Phase 1A schema
+
+After Phase 1B.1, an unstamped pre-integrity database legitimately lacks the two product
+identity columns. The current inspector reports **B-**, not drift. Back up, then stamp the
+revision the schema actually represents:
+
+```bash
+cd backend && DATABASE_URL="<target>" .venv/bin/python -m alembic stamp 0003_reconcile_index_names
+```
+
+Do **not** stamp `head`: that would falsely mark migration `0004` applied and skip its
+backfill and constraints. Re-run the inspector; expect A-, then follow §2.3 below.
+
 Note on index names: a `create_all`-built database already uses the model naming
 (`ix_product_snapshots_*`). Migration `0003_reconcile_index_names` converges the two
 historical schemes and is written to be a no-op on a database that is already correct, so
@@ -144,7 +158,7 @@ cd backend && DATABASE_URL="<target>" .venv/bin/python scripts/check_schema_stat
 3. Decide, per difference, whether the database or the models are correct.
 4. Reconcile by hand with explicit SQL, or write a migration that brings the database to
    the expected shape, then stamp the revision *before* that migration and upgrade.
-5. Only once the inspector reports Case B or A may you continue.
+5. Only once the inspector reports Case B, B-, or A may you continue.
 
 If the drift is small and the data is expendable, restoring from backup into a freshly
 migrated database is often faster and safer than hand-reconciliation.
@@ -166,6 +180,57 @@ Actions → "Database migration (manual)" → Run workflow. It defaults to `insp
 reports Case B. It never runs on push, on a schedule, or on deploy.
 
 Requires the `PRODUCTION_DATABASE_URL` repository secret.
+
+### 2.3 Product duplicate audit and Phase 1B.1 migration
+
+Migration `0004_product_identity_integrity` adds the product identity columns and unique
+indexes. It **does not merge or delete duplicates**. If its backfill finds a conflict, the
+transaction fails with affected product IDs and leaves the schema at `0003`.
+
+First complete §2.2. The database must be Case A at `0003` or A- from `0003` to the current
+head. Then run the product audit; this command is read-only and does not select competitor
+configuration, webhook URLs, or other credentials:
+
+```bash
+cd backend && DATABASE_URL="<target>" .venv/bin/python scripts/audit_product_duplicates.py --json
+```
+
+The report includes exact URL, raw external-ID, canonical URL, derived product-identity,
+and transitive logical duplicate groups. Each group includes affected IDs, snapshot/event
+counts, first/last/check timestamps, prices, stock, active state, and misses.
+
+If `logical_duplicate_groups` and `invalid_identity_rows` are both empty, apply normally:
+
+```bash
+cd backend && DATABASE_URL="<target>" .venv/bin/python -m alembic upgrade head
+```
+
+If duplicates exist, stop Sync and use a maintenance window. Take a fresh database backup
+outside the repository, inspect the dry-run plan, then apply with all three safeguards:
+
+```bash
+cd backend && DATABASE_URL="<target>" .venv/bin/python scripts/consolidate_product_duplicates.py
+```
+
+```bash
+cd backend && DATABASE_URL="<target>" .venv/bin/python scripts/consolidate_product_duplicates.py \
+  --apply \
+  --backup-confirmed \
+  --confirm MERGE_DUPLICATE_PRODUCTS \
+  --plan-json "/secure/backup/location/product-merge-plan-$(date +%F-%H%M).json"
+```
+
+The apply transaction locks product/history writes, selects a stable canonical row ID,
+copies current commercial state from the most recently checked row, retains the earliest
+`first_seen_at` and latest observation timestamps, repoints every `ProductSnapshot` and
+`Event`, and only then deletes redundant current-state rows. It never deduplicates or
+deletes snapshots/events. The mandatory JSON plan and database backup are the recovery
+record for the removed duplicate current-state rows.
+
+Re-run the read-only audit and require zero groups, then apply `alembic upgrade head` and
+run the schema classifier again. Only after it reports Case A may `DB_SCHEMA_CHECK=strict`
+be enabled. Do not use the GitHub `stamp-head` action for a B- database, and do not run
+`upgrade` before the explicit duplicate remediation if the audit reports conflicts.
 
 ### Create a new migration
 

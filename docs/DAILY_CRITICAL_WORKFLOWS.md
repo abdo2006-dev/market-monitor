@@ -230,8 +230,8 @@ increment `consecutive_misses` and deactivate at 3.
 
 | # | Failure | Evidence |
 |---|---|---|
-| Y1 | **No locking; concurrent scans duplicate products.** Two overlapping scans both read an empty table and both INSERT. Reproduced deterministically. | `test_concurrent_scans_of_one_competitor_are_not_prevented` |
-| Y2 | **No `UNIQUE (competitor_id, url)`.** The database accepts the duplicates Y1 creates. The losing row is never matched again and emits a **false `product_removed`** after 3 scans — which `sales-trends` counts as a phantom sale. | `test_no_unique_constraint_protects_product_url` |
+| Y1 | **Resolved in Phase 1B.1.** Concurrent acquisition is allowed, but PostgreSQL serializes the whole reconciliation transaction per competitor. | `test_concurrent_scans_of_one_competitor_reconcile_once` |
+| Y2 | **Resolved in Phase 1B.1.** PostgreSQL enforces canonical URL and product-level identity uniqueness; explicit remediation preserves existing history. | `test_database_rejects_duplicate_canonical_product_url`, `test_database_rejects_duplicate_product_identity_key` |
 | Y3 | **Price-change thresholds are dead config.** `MIN_PRICE_CHANGE_AMOUNT` / `_PERCENTAGE` are settable in env, `.env.example`, and the Settings UI, and honoured nowhere. Detection uses a hardcoded 0.001 epsilon. | `test_tiny_price_difference_below_configured_threshold_still_fires` |
 | Y4 | **A degraded scraper manufactures sales signals.** Stock is compared as a raw string, so `in_stock → unknown` emits `stock_out`, which `sales-trends` counts as an inferred sale. | `test_unknown_stock_status_is_treated_as_a_transition` |
 | Y5 | **`scrape_failed` events are never marked notified**, accumulating forever. | `test_scrape_failed_event_is_never_marked_notified` |
@@ -253,8 +253,19 @@ increment `consecutive_misses` and deactivate at 3.
 
 ### What Phase 1A verified
 
-21 regression tests in `backend/tests/critical/test_sync_regression.py`, run
+32 regression tests in `backend/tests/critical/test_sync_regression.py`, plus 5 focused
+product-integrity tests in `test_product_integrity.py`, run
 against a real PostgreSQL database with only the network scraper replaced.
+
+Phase 1B.1 specifically proves: same new observation concurrently creates one product;
+the same changed price concurrently creates one event; duplicate canonical URLs and
+Shopify variant-changing external IDs collapse once; a Shopify variant selection change
+retains one parent product; an older-started acquisition finishing last cannot overwrite a
+later-started committed success; a later failure does not suppress an older valid result
+or erase an intervening successful watermark; URL changes retain history; a uniqueness
+collision rolls back and retries the complete decision exactly once; database constraints
+reject direct duplicates; and the former duplicate → false removal chain no longer
+produces a removed signal in sales trends.
 
 ---
 
@@ -338,9 +349,10 @@ is not.
 
 ## 6. Measuring the real workload (Part E)
 
-`backend/scripts/benchmark_scan.py` measures acquisition **without touching
-stored data**: it calls `scrape_competitor` directly and never runs detection,
-opens a write transaction, creates a `ScrapeRun`, or sends a notification.
+`backend/scripts/benchmark_scan.py` measures acquisition **without touching stored data**:
+it loads only six competitor configuration fields in a PostgreSQL read-only transaction,
+rolls that transaction back, calls `scrape_competitor` directly, and never runs detection,
+creates a `ScrapeRun`, changes scan state, or sends a notification.
 
 ```bash
 cd backend && .venv/bin/python scripts/benchmark_scan.py --max-pages 2
@@ -350,11 +362,10 @@ cd backend && .venv/bin/python scripts/benchmark_scan.py --max-pages 2
 cd backend && .venv/bin/python scripts/benchmark_scan.py --json /tmp/bench.json
 ```
 
-Per competitor it reports: strategy, whether a browser is required, listing-URL
-count, wall-clock duration, products found, products with a price, distinct
-categories, HTTP request count, total/median/slowest network time, HTTP errors,
-peak memory, and a duration bucket. It aggregates the **sum of durations** —
-the cost of a serial "scan all" — against the 300 s Vercel limit.
+Per competitor it reports: strategy, whether a browser is required, listing-URL count,
+wall-clock duration, products found/priced, catalog-page and HTTP request counts,
+total/median/slowest network time, status/throttling/server-error counts, repeated GETs,
+approximate Python allocation peak, and a duration bucket. It aggregates the serial cost.
 
 Two honesty details worth knowing:
 
@@ -362,28 +373,51 @@ Two honesty details worth knowing:
   `EMPTY (would fail a real sync)` and counted as failures, because the scraper
   swallows connection errors and returns `[]` rather than raising
   (`docs/SCRAPING_ARCHITECTURE.md` §1.7). A naive success count would be wrong.
-- Output **never includes `selector_config`**, which can contain third-party
-  Storefront access tokens. The JSON file still contains competitor names and
-  base URLs — review before sharing.
+- Output suppresses URL-bearing scraper logs and **never includes** the database URL,
+  storefront/listing URLs, `selector_config`, tokens, or raw exception messages. The JSON
+  contains non-sensitive configured competitor labels and is written mode `0600`.
+- Request counts instrument aiohttp/httpx, not Playwright traffic. `tracemalloc` measures
+  Python allocations rather than whole-process RSS. Completeness is not observable from
+  the current scraper contract and is reported honestly as such.
 
 **This makes real requests to real competitor sites. Never run it in CI**, and do
 not loop it.
 
-### Not yet measured
+### 2026-08-11 real sequential result
 
-The benchmark was verified against an unreachable local host (connection
-refused), which exercises timing, request counting, memory measurement, error
-handling, and the empty-result bucket — but produces no real durations. **The
-numbers that decide the topology question do not exist yet.** The owner must run
-this against their configured competitors; §7 cannot be resolved until they do.
+One normal five-page-cap run used application pacing and competitor configuration. Raw
+sanitized output remains outside the repository.
+
+| Measure | Result |
+|---|---:|
+| Active competitors | 12 |
+| Measured wall clock | 30.08 s |
+| Sum of competitor durations | 30.04 s |
+| Median competitor | 1.99 s |
+| Slowest | BloxCrew, 8.23 s |
+| Non-empty / empty / exception | 11 / 1 / 0 |
+| Products with prices | 7,950 |
+| HTTP requests / successful catalog pages | 65 / 49 |
+| 429 / 5xx / measured request exceptions | 0 / 0 / 0 |
+| Browser-required competitors | 0 |
+| Maximum Python allocation peak | 17.4 MB |
+
+Eleven competitors used Shopify HTTP acquisition and one used Salla HTTP acquisition.
+Every non-empty competitor completed in under ten seconds. Shopbloxs returned empty after
+eight HTTP requests and would be rejected by normal Sync. Three competitors returned
+exactly 1,250 products (`5 pages * 250`), so they may be truncated; topology evidence must
+not be mistaken for completeness evidence. This was one acquisition-only run and excludes
+reconciliation, notification, and cold runner setup.
 
 ---
 
-## 7. Deployment topology (Part F) — still open
+## 7. Deployment topology (Part F) — proposal ready
 
-Full decision matrix and recommendation: `docs/adr/0006-background-jobs-and-delivery.md`.
-
-Phase 1A did not migrate anything, and the decision remains open pending §6 data.
+The current matrix and recommendation are in ADR 0008. It proposes a ~$5/month persistent
+Railway Python worker polling durable PostgreSQL runs, with public GitHub Actions as the
+$0 fallback. Live Export stays synchronous on Vercel. The ADR remains **Proposed** pending
+the owner's cost/reliability choice; no worker, endpoint, lifecycle, or topology was
+implemented in this closeout.
 
 ---
 
@@ -458,10 +492,11 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:543
 | Suite | Tests | Covers |
 |---|---|---|
 | `test_schema_authority.py` | 10 | Alembic is the sole schema authority |
-| `test_sync_regression.py` | 21 | reconciliation, idempotency, failure, the concurrency race |
+| `test_sync_regression.py` | 32 | reconciliation, idempotency, failure, concurrency and ordering |
+| `test_product_integrity.py` | 5 | identity contract, constraints, audit and consolidation |
 | `test_search_regression.py` | 23 | matching, grouping, best price, freshness blind spot |
 | `test_export_regression.py` | 28 | validation, formats, fields, fallback provenance |
-| **total** | **82** | plus the 65 pre-existing unit tests = **147** |
+| **total** | **98** | plus the 65 pre-existing unit tests = **163** |
 
 Database-backed tests **skip** when `TEST_DATABASE_URL` is unset, and CI fails if
 that happens there (`.github/workflows/ci.yml`).

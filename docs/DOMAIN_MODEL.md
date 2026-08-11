@@ -62,20 +62,46 @@ default, so a misconfigured competitor looks like a scraping failure.
 The current known state of one item at one competitor. Mutable — it is overwritten in
 place on every scan.
 
-Identity is **not** enforced by the database (no unique constraint). It is resolved in
-`services/detection.py:235` as: match by `url`, else match by `external_id`, else treat as
-new. Title matching was deliberately rejected (`detection.py:42`) because stores reuse
-short item names — preserve this decision.
+As of Phase 1B.1, identity is enforced by PostgreSQL and resolved in
+`domain/product_identity.py`. The raw `url` and `external_id` remain source evidence;
+`canonical_url` and nullable `identity_key` are the integrity keys. PostgreSQL guarantees
+one `(competitor_id, canonical_url)` and, where present, one
+`(competitor_id, identity_key)`. Title matching remains deliberately rejected because
+stores reuse short item names.
 
-`external_id` format varies by source: `"{product_id}:{variant_id}"` for Shopify,
-the raw id for Salla, `None` for generic Playwright scraping. It is a `String(255)` with
-no format contract.
+| Source | Raw external ID | Product-level identity |
+|---|---|---|
+| Shopify `/products.json` | `product_id:variant_id` | product component only |
+| Shopify Storefront GraphQL | `product_id:selected_available_variant_id` | product component only |
+| Shopify sitemap fallback | product + variant where extractable | product component; canonical URL otherwise |
+| Salla | raw product ID | full raw ID |
+| Generic Playwright / custom selectors | `None` | canonical URL only |
+
+Canonical URLs lowercase scheme/host, remove `www.` and default ports, collapse redundant
+slashes/trailing slash, remove fragments and known tracking parameters, and sort all
+remaining query parameters. Unknown query parameters are retained because a generic
+store may identify products in its query string. For configured Shopify scans only,
+`/product/<handle>` and `/products/<handle>` converge. Locale prefixes, unknown redirects,
+and HTTP-versus-HTTPS are intentionally not guessed.
+
+Within one payload, observations sharing either key are one logical product. They are
+collapsed deterministically before matching; conflicts are logged. A database uniqueness
+violation is a named, observable race and receives one fresh reconciliation retry.
 
 Lifecycle: `active=True` on every sighting with `consecutive_misses` reset to 0. A product
 absent from a scan increments `consecutive_misses`; at 3 (`CONSECUTIVE_MISS_THRESHOLD`,
 `detection.py:12`) it flips to `active=False` and emits `product_removed`. There is no
 resurrection path in code — a returning product matches by URL and is set `active=True`
 again, but no `product_returned` event is emitted.
+
+The reconciliation transaction is serialized per competitor with a transaction-scoped
+PostgreSQL advisory lock. Acquisition happens before this transaction. An older-started
+scan that reaches the lock after a later-started scan committed is recorded as successful
+but does not overwrite product state or increment misses. Ordering is established by the
+persisted `(ScrapeRun.started_at, ScrapeRun.id)` ordering and a committed later
+`status='success'`; failed runs do not participate. Phase 1B.2 needs an explicit
+stale/skipped terminal state because the
+current free-text vocabulary still calls the no-op attempt `success`.
 
 ## ProductSnapshot
 

@@ -4,7 +4,8 @@ Dependency-aware sequence. Each step is narrowly scoped and independently shippa
 **Do not batch steps** — the scan pathway is the highest-risk code in the repository and
 large simultaneous changes there are not reviewable.
 
-Current position: **Phase 1A complete. Phase 1B not started.** See `docs/PROJECT_STATUS.md`.
+Current position: **Phase 1B.1 complete. Phase 1B.2 awaits the topology decision.** See
+`docs/PROJECT_STATUS.md`.
 
 ---
 
@@ -37,7 +38,7 @@ One-line application change (`tsconfig.json` lib), verified byte-identical build
 ## Phase 1A — Daily critical path foundation ✅ complete
 
 **P0 done.** Alembic is now the single schema authority: startup DDL removed, migration
-`0003` converges the two historical index-naming schemes, a read-only Case A/B/C/D
+`0003` converges the two historical index-naming schemes, a read-only Case A/A-/B/B-/C/D
 diagnostic added, a manual-only production migration workflow added, and the CI drift
 check promoted from `continue-on-error` to a required gate. Also fixed: `alembic revision`
 had never worked (`alembic/script.py.mako` was missing from the repo).
@@ -61,32 +62,30 @@ contracts (Part H).
 **Objective: make competitor price synchronisation reliable enough that Search can be
 trusted every morning.** Everything in this phase serves that sentence.
 
-### 1B.0 — Run the benchmark and settle the topology · **blocking, not a coding task**
+### 1B.0 — Run the benchmark and settle the topology ✅ evidence gathered
 
 ```bash
 cd backend && .venv/bin/python scripts/benchmark_scan.py --json /tmp/bench.json
 ```
 
-Record the numbers in `docs/DAILY_CRITICAL_WORKFLOWS.md` §6, then choose Option A, B, or C
-and update `docs/adr/0006` to Accepted. Phase 1A recommends **Option A (persistent
-worker)**, primarily because Option B's failure mode is silent.
+The real acquisition benchmark is now recorded in `docs/DAILY_CRITICAL_WORKFLOWS.md` §6.
+ADR 0008 proposes a persistent PostgreSQL-polling Railway worker (~$5/month), with a
+public GitHub Actions runner as the $0 fallback. The owner still needs to accept the cost
+tradeoff; no topology has been implemented.
 
 **Nothing in 1B.2–1B.5 should start before this is settled** — the runner implementation
 differs substantially between options.
 
-### 1B.1 — Stop duplicate products (Y1 + Y2) · *can start immediately*
+### 1B.1 — Stop duplicate products (Y1 + Y2) ✅ complete
 
 The highest-value correctness fix available, and independent of topology.
 
-1. Audit existing duplicates and report before constraining.
-2. Data-cleanup migration merging duplicate `(competitor_id, url)` rows, preserving
-   snapshot history from both.
-3. Add `UNIQUE (competitor_id, url)` and a partial unique on `external_id`.
-4. Add a PostgreSQL advisory lock around scan entry.
-5. Invert the assertion in `test_concurrent_scans_of_one_competitor_are_not_prevented`.
+Implemented as ADR 0007: read-only audit; explicit, backup-gated consolidation preserving
+all snapshots/events; canonical URL plus derived product-level identity constraints; and a
+transaction advisory lock around the complete reconciliation region. The original race
+assertion is inverted and stale scan completion ordering is also guarded.
 
-*Why it matters:* duplicates cause false `product_removed` events, which `sales-trends`
-counts as phantom sales.
+*Why it matters:* the duplicate → false `product_removed` chain is now closed.
 
 ### 1B.2 — Durable scan lifecycle (ADR 0003)
 

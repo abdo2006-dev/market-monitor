@@ -18,6 +18,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.models import Event, Product, ProductSnapshot, ScrapeRun
 from tests.conftest import requires_db
@@ -384,7 +385,25 @@ async def test_product_matched_by_external_id_when_url_changes(db_session, monke
         db_session, competitor, "Renamed", price="9.00",
         url="https://teststore.example/products/old-handle", external_id="900:901",
     )
+    historical_snapshot = ProductSnapshot(
+        product_id=product.id,
+        title=product.title,
+        price=product.current_price,
+        currency=product.currency,
+        stock_status=product.stock_status,
+        checked_at=product.last_checked_at,
+    )
+    historical_event = Event(
+        competitor_id=competitor.id,
+        product_id=product.id,
+        event_type="price_decrease",
+        event_message="historical fixture",
+        detected_at=product.last_checked_at,
+    )
+    db_session.add_all([historical_snapshot, historical_event])
     await db_session.commit()
+    original_snapshot_id = historical_snapshot.id
+    original_event_id = historical_event.id
 
     patch_scraper(monkeypatch, [
         observation("Renamed", price=9.00,
@@ -401,6 +420,27 @@ async def test_product_matched_by_external_id_when_url_changes(db_session, monke
         await db_session.execute(select(Product).where(Product.id == product.id))
     ).scalar_one()
     assert refreshed.url.endswith("/new-handle")
+    assert refreshed.canonical_url.endswith("/new-handle")
+    assert refreshed.identity_key == "external-product:900"
+
+    snapshots = (
+        await db_session.execute(
+            select(ProductSnapshot)
+            .where(ProductSnapshot.product_id == product.id)
+            .order_by(ProductSnapshot.id)
+        )
+    ).scalars().all()
+    events = (
+        await db_session.execute(
+            select(Event).where(Event.product_id == product.id).order_by(Event.id)
+        )
+    ).scalars().all()
+    assert snapshots[0].id == original_snapshot_id
+    assert len(snapshots) == 2, "URL evidence changes append history; they do not replace it"
+    assert [event.id for event in events] == [original_event_id]
+    assert [event.event_type for event in events] == ["price_decrease"]
+    assert "new_product" not in await event_types(db_session, competitor.id)
+    assert "product_removed" not in await event_types(db_session, competitor.id)
 
 
 async def test_identical_titles_at_different_urls_stay_distinct(db_session, monkeypatch):
@@ -571,15 +611,12 @@ async def test_inactive_competitor_is_skipped_and_returns_none(db_session, monke
 
 # ── Concurrency ───────────────────────────────────────────────────────────────
 
-async def test_concurrent_scans_of_one_competitor_are_not_prevented(
+async def test_concurrent_scans_of_one_competitor_reconcile_once(
     db_session, monkeypatch
 ):
     """
-    Characterisation of ARCHITECTURE A-6: nothing serialises two overlapping
-    scans of the same competitor.
-
-    The scraper is made slow enough that the two runs genuinely overlap. This
-    does NOT mock away the race - it demonstrates it.
+    Regression for Phase 1A Y1/Y2. Acquisition overlaps, but PostgreSQL
+    serializes the complete reconciliation read/decide/write region.
     """
     competitor = await make_competitor(db_session)
     await db_session.commit()
@@ -601,53 +638,494 @@ async def test_concurrent_scans_of_one_competitor_are_not_prevented(
 
     summary = await counts(db_session, competitor.id)
 
-    # Both scans ran: there is no lock and no guard on this path (A-6).
+    # Phase 1B.1 does not yet deduplicate durable ScrapeRun requests. Both
+    # acquisitions are recorded; only product reconciliation is serialized.
     assert summary["runs"] == 2, (
-        "A-6: two overlapping scans both created ScrapeRun rows - no locking exists"
+        "full durable scan request idempotency is deferred to Phase 1B.2"
     )
-
-    # CHARACTERISATION OF A DEFECT, NOT A DESIRED PROPERTY.
-    #
-    # With no advisory lock (A-6) and no UNIQUE (competitor_id, url) (A-7), both
-    # scans read an empty product table and both INSERT. One product URL becomes
-    # two rows. Downstream, the losing row is never matched again, accrues
-    # consecutive_misses, and after three scans emits a FALSE product_removed
-    # event - which sales-trends then counts as a phantom signal.
-    #
-    # Phase 1B is done when this assertion has to be inverted to == 1.
-    assert summary["products"] == 2, (
-        "Expected the documented duplicate-product race to reproduce. "
-        f"Got {summary['products']} product rows. If this is now 1, the race has "
-        "been fixed - invert this assertion and update docs/ARCHITECTURE.md A-6/A-7."
-    )
+    assert summary["products"] == 1
+    assert summary["snapshots"] == 1
+    assert summary["events"] == 1
 
     urls = (
         await db_session.execute(
             select(Product.url).where(Product.competitor_id == competitor.id)
         )
     ).scalars().all()
-    assert len(set(urls)) == 1, "both rows are the same product URL"
+    assert urls == ["https://teststore.example/products/racy"]
 
 
-async def test_no_unique_constraint_protects_product_url(db_session):
+async def test_database_rejects_duplicate_canonical_product_url(db_session):
     """
-    Direct proof of A-7: the database accepts two products with the same
-    (competitor_id, url). Detection's in-memory {url: product} index is the only
-    thing enforcing identity.
+    The database is the final backstop, including URL forms that canonicalize
+    to the same product.
     """
     competitor = await make_competitor(db_session)
     url = "https://teststore.example/products/dupe"
     await make_product(db_session, competitor, "Dupe A", price="1.00", url=url)
-    await make_product(db_session, competitor, "Dupe B", price="2.00", url=url)
+    with pytest.raises(IntegrityError) as excinfo:
+        await make_product(
+            db_session,
+            competitor,
+            "Dupe B",
+            price="2.00",
+            url=f"{url}/?utm_source=test#fragment",
+        )
+    assert "uq_products_competitor_canonical_url" in str(excinfo.value)
+    await db_session.rollback()
+
+
+async def test_database_rejects_duplicate_product_identity_key(db_session):
+    competitor = await make_competitor(db_session)
+    await make_product(
+        db_session,
+        competitor,
+        "First handle",
+        url="https://teststore.example/products/first",
+        external_id="900:901",
+    )
+    with pytest.raises(IntegrityError) as excinfo:
+        await make_product(
+            db_session,
+            competitor,
+            "Second handle",
+            url="https://teststore.example/products/second",
+            external_id="900:999",
+        )
+    assert "uq_products_competitor_identity_key" in str(excinfo.value)
+    await db_session.rollback()
+
+
+async def test_duplicate_urls_within_payload_create_one_product(db_session, monkeypatch):
+    competitor = await make_competitor(db_session)
+    await db_session.commit()
+    patch_scraper(
+        monkeypatch,
+        [
+            observation(
+                "Tracked",
+                price=7.0,
+                url="https://www.teststore.example/products/tracked/?utm_source=a#top",
+            ),
+            observation(
+                "Tracked",
+                price=7.0,
+                url="https://teststore.example/products/tracked",
+            ),
+        ],
+    )
+    result = await run_sync(competitor.id)
+    assert result["new_products"] == 1
+    assert (await counts(db_session, competitor.id))["products"] == 1
+
+
+async def test_duplicate_external_product_ids_within_payload_create_one_product(
+    db_session, monkeypatch
+):
+    competitor = await make_competitor(db_session)
+    await db_session.commit()
+    patch_scraper(
+        monkeypatch,
+        [
+            observation(
+                "Variant choice A",
+                price=7.0,
+                url="https://teststore.example/products/old-handle",
+                external_id="500:501",
+            ),
+            observation(
+                "Variant choice B",
+                price=8.0,
+                url="https://teststore.example/products/new-handle",
+                external_id="500:502",
+            ),
+        ],
+    )
+    result = await run_sync(competitor.id)
+    assert result["new_products"] == 1
+    assert (await counts(db_session, competitor.id))["products"] == 1
+
+
+async def test_shopify_variant_change_retains_one_parent_product(
+    db_session, monkeypatch
+):
+    competitor = await make_competitor(db_session, scrape_type="shopify_json")
+    product = await make_product(
+        db_session,
+        competitor,
+        "Variant selection",
+        price="7.00",
+        url="https://teststore.example/products/variant-selection",
+        external_id="500:501",
+        sku="OLD-SKU",
+    )
     await db_session.commit()
 
-    rows = (
+    patch_scraper(
+        monkeypatch,
+        [
+            observation(
+                "Variant selection",
+                price=7.0,
+                url="https://teststore.example/products/variant-selection",
+                external_id="500:999",
+                sku="NEW-SKU",
+            )
+        ],
+    )
+    result = await run_sync(competitor.id)
+
+    assert result["status"] == "success"
+    assert result["new_products"] == 0
+    db_session.expunge_all()
+    refreshed = (
+        await db_session.execute(select(Product).where(Product.id == product.id))
+    ).scalar_one()
+    assert refreshed.external_id == "500:999"
+    assert refreshed.identity_key == "external-product:500"
+    assert (await counts(db_session, competitor.id))["products"] == 1
+    assert await event_types(db_session, competitor.id) == []
+
+
+async def test_same_price_change_concurrently_emits_one_logical_event(
+    db_session, monkeypatch
+):
+    competitor = await make_competitor(db_session)
+    product = await make_product(
+        db_session,
+        competitor,
+        "Concurrent price",
+        price="10.00",
+        url="https://teststore.example/products/concurrent-price",
+    )
+    await db_session.commit()
+
+    async def slow_scrape(competitor_dict, **kwargs):
+        await asyncio.sleep(0.2)
+        return [
+            observation(
+                "Concurrent price",
+                price=8.0,
+                url="https://teststore.example/products/concurrent-price",
+            )
+        ]
+
+    import app.services.scraper as scraper_module
+
+    monkeypatch.setattr(scraper_module, "scrape_competitor", slow_scrape)
+    results = await asyncio.gather(run_sync(competitor.id), run_sync(competitor.id))
+    assert all(result["status"] == "success" for result in results)
+
+    db_session.expunge_all()
+    refreshed = (
+        await db_session.execute(select(Product).where(Product.id == product.id))
+    ).scalar_one()
+    assert refreshed.current_price == Decimal("8.00")
+    assert await event_types(db_session, competitor.id) == ["price_decrease"]
+
+
+async def test_older_scan_cannot_overwrite_later_started_scan(db_session, monkeypatch):
+    competitor = await make_competitor(db_session)
+    product = await make_product(
+        db_session,
+        competitor,
+        "Ordered",
+        price="10.00",
+        url="https://teststore.example/products/ordered",
+    )
+    await db_session.commit()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    calls = 0
+
+    async def ordered_scrape(competitor_dict, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            await release_first.wait()
+            price = 5.0
+        else:
+            price = 3.0
+        return [
+            observation(
+                "Ordered",
+                price=price,
+                url="https://teststore.example/products/ordered",
+            )
+        ]
+
+    import app.services.scraper as scraper_module
+
+    monkeypatch.setattr(scraper_module, "scrape_competitor", ordered_scrape)
+    older = asyncio.create_task(run_sync(competitor.id))
+    await first_started.wait()
+    newer = asyncio.create_task(run_sync(competitor.id))
+    newer_result = await newer
+    release_first.set()
+    older_result = await older
+
+    assert newer_result["price_changes"] == 1
+    assert older_result["price_changes"] == 0
+    db_session.expunge_all()
+    refreshed = (
+        await db_session.execute(select(Product).where(Product.id == product.id))
+    ).scalar_one()
+    assert (await counts(db_session, competitor.id))["products"] == 1
+    assert refreshed.current_price == Decimal("3.00")
+    assert refreshed.stock_status == "in_stock"
+    assert refreshed.active is True
+    assert refreshed.consecutive_misses == 0
+    assert await event_types(db_session, competitor.id) == ["price_decrease"]
+
+    runs = (
         await db_session.execute(
-            select(Product).where(Product.competitor_id == competitor.id)
+            select(ScrapeRun)
+            .where(ScrapeRun.competitor_id == competitor.id)
+            .order_by(ScrapeRun.started_at)
         )
     ).scalars().all()
+    assert len(runs) == 2
+    assert runs[0].started_at < runs[1].started_at
+    assert runs[0].status == runs[1].status == "success"
 
-    assert len(rows) == 2, (
-        "A-7: PostgreSQL accepted duplicate (competitor_id, url). "
-        "Adding UNIQUE requires a data-cleanup migration first."
+    # Only B advanced the competitor freshness watermark. A finished after B,
+    # so a commit-time-only guard would incorrectly make this later than B.
+    from app.models import Competitor
+
+    refreshed_competitor = (
+        await db_session.execute(select(Competitor).where(Competitor.id == competitor.id))
+    ).scalar_one()
+    assert refreshed_competitor.last_scan_at <= runs[0].finished_at
+    assert refreshed_competitor.last_scan_at >= runs[1].started_at
+
+    snapshots = (
+        await db_session.execute(
+            select(ProductSnapshot).where(ProductSnapshot.product_id == product.id)
+        )
+    ).scalars().all()
+    assert [snapshot.price for snapshot in snapshots] == [Decimal("3.00")]
+    assert "price_increase" not in await event_types(db_session, competitor.id)
+    assert "stock_out" not in await event_types(db_session, competitor.id)
+    assert "product_removed" not in await event_types(db_session, competitor.id)
+
+
+async def test_later_failed_scan_does_not_suppress_older_success(db_session, monkeypatch):
+    competitor = await make_competitor(db_session)
+    product = await make_product(
+        db_session,
+        competitor,
+        "Failure ordering",
+        price="10.00",
+        url="https://teststore.example/products/failure-ordering",
     )
+    await db_session.commit()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    calls = 0
+
+    async def ordered_scrape(competitor_dict, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            await release_first.wait()
+            return [
+                observation(
+                    "Failure ordering",
+                    price=5.0,
+                    url="https://teststore.example/products/failure-ordering",
+                )
+            ]
+        raise RuntimeError("later scan failed acquisition")
+
+    import app.services.scraper as scraper_module
+
+    monkeypatch.setattr(scraper_module, "scrape_competitor", ordered_scrape)
+    older = asyncio.create_task(run_sync(competitor.id))
+    await first_started.wait()
+    newer_result = await run_sync(competitor.id)
+    release_first.set()
+    older_result = await older
+
+    assert newer_result["status"] == "failed"
+    assert older_result["status"] == "success"
+    assert older_result["price_changes"] == 1
+    db_session.expunge_all()
+    refreshed = (
+        await db_session.execute(select(Product).where(Product.id == product.id))
+    ).scalar_one()
+    assert (await counts(db_session, competitor.id))["products"] == 1
+    assert refreshed.current_price == Decimal("5.00")
+    assert await event_types(db_session, competitor.id) == [
+        "scrape_failed",
+        "price_decrease",
+    ]
+
+
+async def test_later_failure_cannot_erase_intervening_success_ordering(
+    db_session, monkeypatch
+):
+    """A failed run must not erase the durable watermark from a successful run."""
+    competitor = await make_competitor(db_session)
+    product = await make_product(
+        db_session,
+        competitor,
+        "Three-way ordering",
+        price="10.00",
+        url="https://teststore.example/products/three-way-ordering",
+    )
+    await db_session.commit()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    calls = 0
+
+    async def ordered_scrape(competitor_dict, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            await release_first.wait()
+            price = 5.0
+        elif calls == 2:
+            price = 3.0
+        else:
+            raise RuntimeError("third acquisition failed")
+        return [
+            observation(
+                "Three-way ordering",
+                price=price,
+                url="https://teststore.example/products/three-way-ordering",
+            )
+        ]
+
+    import app.services.scraper as scraper_module
+
+    monkeypatch.setattr(scraper_module, "scrape_competitor", ordered_scrape)
+    oldest = asyncio.create_task(run_sync(competitor.id))
+    await first_started.wait()
+    successful = await run_sync(competitor.id)
+    failed = await run_sync(competitor.id)
+    release_first.set()
+    stale = await oldest
+
+    assert successful["status"] == "success"
+    assert failed["status"] == "failed"
+    assert stale["status"] == "success"
+    assert stale["price_changes"] == 0
+    db_session.expunge_all()
+    refreshed = (
+        await db_session.execute(select(Product).where(Product.id == product.id))
+    ).scalar_one()
+    assert refreshed.current_price == Decimal("3.00")
+    assert await event_types(db_session, competitor.id) == [
+        "price_decrease",
+        "scrape_failed",
+    ]
+
+
+async def test_concurrency_fix_prevents_false_removal_chain(
+    db_session, monkeypatch, api_client
+):
+    competitor = await make_competitor(db_session)
+    await db_session.commit()
+
+    payload = [
+        observation(
+            "No phantom removal",
+            price=5.0,
+            url="https://teststore.example/products/no-phantom-removal",
+        )
+    ]
+
+    async def overlapping_scrape(competitor_dict, **kwargs):
+        await asyncio.sleep(0.15)
+        return payload
+
+    import app.services.scraper as scraper_module
+
+    monkeypatch.setattr(scraper_module, "scrape_competitor", overlapping_scrape)
+    await asyncio.gather(run_sync(competitor.id), run_sync(competitor.id))
+    patch_scraper(monkeypatch, payload)
+    for _ in range(3):
+        await run_sync(competitor.id)
+
+    assert "product_removed" not in await event_types(db_session, competitor.id)
+    response = await api_client.get(
+        "/api/dashboard/sales-trends",
+        params={"competitor_id": competitor.id, "period": "day"},
+    )
+    assert response.status_code == 200
+    row = response.json()["competitors"][0]
+    assert row["removed_count"] == 0
+
+
+async def test_identity_constraint_collision_is_observable_and_retried(
+    db_session, monkeypatch, caplog
+):
+    competitor = await make_competitor(db_session)
+    await db_session.commit()
+    patch_scraper(
+        monkeypatch,
+        [observation("Retry", price=1.0, url="https://teststore.example/products/retry")],
+    )
+
+    import app.services.detection as detection_module
+
+    real_detect = detection_module.detect_changes
+    calls = 0
+
+    class WonRace(Exception):
+        constraint_name = "uq_products_competitor_canonical_url"
+
+    async def colliding_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await real_detect(*args, **kwargs)
+            await args[0].flush()
+            raise IntegrityError("INSERT products", {}, WonRace("winner committed"))
+        return await real_detect(*args, **kwargs)
+
+    monkeypatch.setattr(detection_module, "detect_changes", colliding_once)
+    result = await run_sync(competitor.id)
+    assert result["status"] == "success"
+    assert calls == 2
+    summary = await counts(db_session, competitor.id)
+    assert summary["products"] == 1
+    assert summary["snapshots"] == 1
+    assert summary["events"] == 1
+    assert "identity race resolved by retry" in caplog.text.lower()
+
+
+async def test_identity_constraint_collision_retries_only_once(
+    db_session, monkeypatch
+):
+    competitor = await make_competitor(db_session)
+    await db_session.commit()
+    patch_scraper(
+        monkeypatch,
+        [observation("Retry twice", price=1.0, url="https://teststore.example/products/retry-twice")],
+    )
+
+    import app.services.detection as detection_module
+
+    calls = 0
+
+    class WonRace(Exception):
+        constraint_name = "uq_products_competitor_canonical_url"
+
+    async def always_collides(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise IntegrityError("INSERT products", {}, WonRace("still conflicting"))
+
+    monkeypatch.setattr(detection_module, "detect_changes", always_collides)
+    result = await run_sync(competitor.id)
+
+    assert result["status"] == "failed"
+    assert calls == 2
+    summary = await counts(db_session, competitor.id)
+    assert summary["products"] == 0
+    assert summary["snapshots"] == 0
+    assert await event_types(db_session, competitor.id) == ["scrape_failed"]

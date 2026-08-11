@@ -113,14 +113,16 @@ last_scan_status, created_at, updated_at`
 `shopify_json`, `salla_json`, `generic_selector`, `custom`.
 
 ### `products`
-`id, competitor_id →competitors, external_id, title, normalized_title, category, url,
-image_url, current_price Numeric(12,2), currency, stock_status, sku, first_seen_at,
-last_seen_at, last_checked_at, active, consecutive_misses`
+`id, competitor_id →competitors, external_id, identity_key, title, normalized_title,
+category, url, canonical_url, image_url, current_price Numeric(12,2), currency,
+stock_status, sku, first_seen_at, last_seen_at, last_checked_at, active,
+consecutive_misses`
 
 Indexes: `competitor_id`, `normalized_title`, `url`, `category`, `active`.
-**There is no unique constraint anywhere on this table** — not on `(competitor_id, url)`,
-not on `(competitor_id, external_id)`. Product identity is enforced only by Python
-dictionaries in `services/detection.py:225`.
+Phase 1B.1 adds database invariants on `(competitor_id, canonical_url)` and the non-null
+`(competitor_id, identity_key)`. Raw URL/external ID remain source evidence. Product
+identity and its conservative canonicalization contract are defined in
+`domain/product_identity.py` and ADR 0007.
 
 ### `product_snapshots`
 `id, product_id →products, title, category, price, currency, stock_status, image_url,
@@ -314,21 +316,27 @@ outside the code and the threshold is a bare literal.
 
 ## 8. Detection and product identity
 
-`services/detection.py:detect_changes` loads **all** products for the competitor into
-memory (`:29`), indexes them by URL and by `external_id` (`:225`), then matches each
-scraped item URL-first, `external_id`-second (`:235`).
+`services/detection.py:detect_changes` canonicalizes and deterministically collapses the
+payload, then loads **all** products for the competitor into memory. It indexes them by
+`canonical_url` and derived product-level `identity_key`, then matches each observation
+canonical-URL-first, identity-key-second.
 
 - Title-based matching was deliberately removed; the comment at `:42` explains why
   (stores reuse short item names). This is a good decision and should be preserved.
-- `_index_existing_products` builds `{p.url: p}`. If duplicate URLs already exist in the
-  table — which nothing prevents — one silently wins and the other is never matched,
-  never updated, and eventually marked `product_removed` after 3 misses.
+- Migration `0004` makes duplicate canonical URLs and non-null product identity keys
+  impossible within one competitor. The explicit pre-migration audit/consolidator handles
+  legacy conflicts without deleting snapshots or events.
 - Any product not seen in a scan gets `consecutive_misses += 1`; at 3 it is deactivated
   and a `product_removed` event fires (`:201`). Because a failed scrape raises before
   reaching detection (`tasks.py:74`), a transient site outage does not falsely
   deactivate a catalogue — the empty-result guard is doing real work here.
 - Price comparison (`:217`) uses an absolute epsilon of 0.001 and ignores the configured
   minimum-change thresholds entirely.
+- The caller holds a transaction-scoped competitor advisory lock around the complete
+  product read/decide/write region. A query against committed successful
+  `(ScrapeRun.started_at, ScrapeRun.id)` values prevents an older-started acquisition from
+  overwriting a newer-started successful observation. Failed runs do not establish
+  ordering.
 
 ---
 

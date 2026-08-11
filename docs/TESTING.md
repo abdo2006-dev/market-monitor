@@ -1,16 +1,17 @@
 # Testing
 
-> **Phase 1A update.** Sections 1–3 below described the state at the Phase 0 baseline.
-> Phase 1A added 82 database-backed regression tests for the daily critical path, so
+> **Phase 1B.1 update.** Sections 1–3 below described the state at the Phase 0 baseline.
+> Phase 1A added 82 database-backed regression tests for the daily critical path. Phase
+> 1B.1 adds 13 product-integrity and concurrency regressions, so
 > several "not covered" claims are now out of date. Current state: **§0** and
 > `docs/DAILY_CRITICAL_WORKFLOWS.md` §9. The target pyramid in §4 is unchanged and still
 > the plan.
 
 ---
 
-## 0. Current state (Phase 1A)
+## 0. Current state (Phase 1B.1)
 
-**147 tests passing**: 65 pre-existing unit tests + 82 daily-critical-path tests.
+**163 tests passing**: 65 pre-existing unit tests + 98 daily-critical-path tests.
 
 ```bash
 docker run -d --rm --name mm_pg -e POSTGRES_USER=market -e POSTGRES_PASSWORD=market -e POSTGRES_DB=market_monitor -p 5432:5432 postgres:16-alpine
@@ -28,7 +29,8 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:543
 |---|---|---|
 | `tests/test_core.py` | 65 | pure helpers (unchanged from Phase 0) |
 | `tests/critical/test_schema_authority.py` | 10 | Alembic is the sole schema authority |
-| `tests/critical/test_sync_regression.py` | 21 | reconciliation, idempotency, failure, the concurrency race |
+| `tests/critical/test_sync_regression.py` | 32 | reconciliation, idempotency, failure, concurrency, stale ordering |
+| `tests/critical/test_product_integrity.py` | 5 | identity semantics, database constraints, duplicate audit/consolidation |
 | `tests/critical/test_search_regression.py` | 23 | matching, grouping, best price, freshness blind spot |
 | `tests/critical/test_export_regression.py` | 28 | validation, formats, fields, fallback provenance |
 

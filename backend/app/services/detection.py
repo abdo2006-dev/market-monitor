@@ -5,6 +5,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from app.models import Product, ProductSnapshot, Event, Competitor
+from app.domain.product_identity import prepare_product_observations, product_identity_key
 from app.utils.text_normalizer import normalize_title
 
 logger = logging.getLogger(__name__)
@@ -25,23 +26,45 @@ async def detect_changes(
     new_count = 0
     price_change_count = 0
 
-    # Load all existing products for this competitor
+    admissible = [item for item in scraped_products if item.get("url")]
+    observations, identity_conflicts = prepare_product_observations(
+        admissible, competitor.scrape_type
+    )
+    for conflict in identity_conflicts:
+        logger.warning(
+            "Collapsed duplicate observations for competitor_id=%s: %s",
+            competitor.id,
+            conflict,
+            extra={
+                "competitor_id": competitor.id,
+                "operation": "deduplicate_observations",
+                "product_identity": conflict,
+            },
+        )
+
+    # This read starts the protected read/decide/write reconciliation region.
+    # The caller must hold the competitor's transaction-scoped advisory lock.
     result = await session.execute(
         select(Product).where(Product.competitor_id == competitor.id)
     )
     existing_products = result.scalars().all()
-    existing_by_url, existing_by_external_id = _index_existing_products(existing_products)
+    existing_by_url, existing_by_identity_key = _index_existing_products(existing_products)
     seen_product_ids = set()
 
-    for item in scraped_products:
-        url = item.get("url", "")
-        if not url:
-            continue
+    for item in observations:
+        url = item["url"]
+        canonical_url = item["canonical_url"]
+        identity_key = item.get("identity_key")
         norm_title = normalize_title(item.get("title", ""))
 
         # Match by stable identifiers only. Product names are useful for search,
         # but are not reliable IDs because stores often reuse short item names.
-        product = _match_existing_product(url, item.get("external_id"), existing_by_url, existing_by_external_id)
+        product = _match_existing_product(
+            canonical_url,
+            identity_key,
+            existing_by_url,
+            existing_by_identity_key,
+        )
 
         if not product:
             # New product
@@ -52,6 +75,8 @@ async def detect_changes(
                 normalized_title=norm_title,
                 category=item.get("category"),
                 url=url,
+                canonical_url=canonical_url,
+                identity_key=identity_key,
                 image_url=item.get("image_url"),
                 current_price=item.get("price"),
                 currency=item.get("currency", "USD"),
@@ -96,9 +121,9 @@ async def detect_changes(
             )
             session.add(event)
             new_count += 1
-            existing_by_url[url] = product
-            if product.external_id:
-                existing_by_external_id[product.external_id] = product
+            existing_by_url[canonical_url] = product
+            if identity_key:
+                existing_by_identity_key[identity_key] = product
             seen_product_ids.add(product.id)
         else:
             # Existing product - check for changes
@@ -168,8 +193,20 @@ async def detect_changes(
                 product.url = url
                 snapshot_needed = True
 
+            if product.canonical_url != canonical_url:
+                existing_by_url.pop(product.canonical_url, None)
+                product.canonical_url = canonical_url
+                existing_by_url[canonical_url] = product
+
             if product.external_id != item.get("external_id"):
                 product.external_id = item.get("external_id")
+
+            if product.identity_key != identity_key:
+                if product.identity_key:
+                    existing_by_identity_key.pop(product.identity_key, None)
+                product.identity_key = identity_key
+                if identity_key:
+                    existing_by_identity_key[identity_key] = product
 
             if new_category != old_category:
                 product.category = new_category
@@ -223,26 +260,26 @@ def _prices_differ(old: Optional[Decimal], new: Optional[float]) -> bool:
 
 
 def _index_existing_products(products: list[Product]) -> tuple[dict[str, Product], dict[str, Product]]:
-    by_url = {p.url: p for p in products}
-    by_external_id = {
-        p.external_id: p
+    by_url = {getattr(p, "canonical_url", p.url): p for p in products}
+    by_identity_key = {
+        (getattr(p, "identity_key", None) or product_identity_key(p.external_id)): p
         for p in products
-        if p.external_id
+        if getattr(p, "identity_key", None) or product_identity_key(p.external_id)
     }
-    return by_url, by_external_id
+    return by_url, by_identity_key
 
 
 def _match_existing_product(
-    url: str,
-    external_id: Optional[str],
+    canonical_url: str,
+    identity_key: Optional[str],
     existing_by_url: dict[str, Product],
-    existing_by_external_id: dict[str, Product],
+    existing_by_identity_key: dict[str, Product],
 ) -> Optional[Product]:
-    product = existing_by_url.get(url)
+    product = existing_by_url.get(canonical_url)
     if product:
         return product
-    if external_id:
-        return existing_by_external_id.get(external_id)
+    if identity_key:
+        return existing_by_identity_key.get(identity_key)
     return None
 
 
