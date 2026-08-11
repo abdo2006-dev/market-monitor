@@ -201,4 +201,27 @@ run lineage, observation time, and absence permission.
 - pure reconciliation/ChangeSet extraction;
 - versioned event payloads and a notification outbox;
 - one owner for market identity and collection taxonomy;
-- Search freshness policy/UX (Phase 1C) and Export provenance (Phase 1D).
+- Export provenance (Phase 1D).
+
+## SearchTrustAssessment
+
+`app.domain.search_trust` is the first Phase 1C Search policy extracted into the domain.
+It consumes only immutable `RunEvidence`, competitor evidence, product observation facts,
+stock state, and a clock. It has no FastAPI, SQLAlchemy, or React dependency.
+
+It returns two separate decisions:
+
+- competitor catalog coverage: `current_complete`, `partial`, `suspicious_empty`,
+  `failed`, `stale`, or `unknown`;
+- price reliability: `reliable`, `degraded`, `unknown`, or `unavailable`.
+
+The daily lifecycle determines the required catalog date. Before 08:47 Cairo, yesterday's
+complete catalog is still the relevant cycle; from 08:47 onward, today's complete catalog
+is required. A reliable price must be directly linked to that latest complete run, have
+an external observation timestamp and price/currency, and be confirmed in stock. The
+policy always returns absolute ages and a warning; it never deletes degraded evidence.
+
+Market statistics are application/API output rather than a stored aggregate. They are
+calculated per currency from the trust decisions. Direct `ProductSnapshot` history, not
+event payloads, is authoritative for recent price-change context. See
+`docs/SEARCH_ARCHITECTURE.md`.

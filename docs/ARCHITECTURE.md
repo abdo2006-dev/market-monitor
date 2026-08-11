@@ -667,7 +667,32 @@ There is no V2 behavioural difference between UI, scan-all, scheduler, or cron. 
 diagnostic data, not a business-code selector. Notification delivery remains legacy and
 does not participate in Sync success; the outbox is still future work.
 
-## B-5. What V2 explicitly does not include
+## B-5. Phase 1C Search slice (implemented)
+
+Interactive Search remains inside the modular monolith and PostgreSQL. The frontend owns
+input behavior and presentation; the backend owns logical grouping, trust decisions,
+currency comparability, and market statistics.
+
+```text
+React combobox -> typed Search routes -> SQL exact-alias fast path
+                                      -> unresolved-competitor compatibility fallback
+                                      -> existing Python market identity/matcher
+                                      -> pure domain Search trust policy
+                                      -> Sync/run/snapshot evidence
+                                      -> typed market response
+```
+
+Phase 1C deliberately did not move the established matching engine out of the combined
+route module. That refactor would create risk without improving the user's daily pricing
+decision. Only the new trust policy is framework-free. Compare resolves definitive
+score-1 aliases with a narrow query, then runs the complete prior matcher for unresolved
+competitors. This removes the common full-table Python bottleneck without silently losing
+fuzzy matches, a search service, or a schema change.
+
+See `docs/SEARCH_ARCHITECTURE.md` for the contract, cycle policy, statistics, profile,
+query-plan evidence, and remaining boundaries.
+
+## B-6. What V2 explicitly does not include
 
 No Kubernetes. No Kafka. No service mesh. No microservices. No event sourcing as a general
 pattern — the outbox is a targeted delivery mechanism, not a storage model. No enterprise

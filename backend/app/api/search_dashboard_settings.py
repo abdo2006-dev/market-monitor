@@ -5,10 +5,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, or_
 from typing import Optional
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from difflib import SequenceMatcher
 from app.database import get_db
-from app.models import Product, Competitor, Event, ScrapeRun, AppSettings
-from app.schemas import ProductOut, EventOut, CompetitorOut, AppSettingsOut, AppSettingsUpdate
+from app.domain.search_trust import (
+    CompetitorEvidence,
+    RunEvidence,
+    assess_search_trust,
+)
+from app.models import Product, ProductSnapshot, Competitor, Event, ScrapeRun, AppSettings
+from app.schemas import (
+    ProductOut,
+    EventOut,
+    CompetitorOut,
+    AppSettingsOut,
+    AppSettingsUpdate,
+    SearchCompareResponse,
+    SearchSuggestionsResponse,
+)
 from app.utils.text_normalizer import normalize_title
 
 search_router = APIRouter(prefix="/api/search", tags=["search"])
@@ -22,6 +36,7 @@ class BatchCompareRequest(BaseModel):
 
 
 MAX_BATCH_COMPARE_QUERIES = 100
+SEARCH_CANDIDATE_LIMIT = 1000
 
 INFERRED_SALE_EVENT_TYPES = ("stock_out",)
 REMOVED_PRODUCT_EVENT_TYPES = ("product_removed",)
@@ -147,14 +162,14 @@ async def search_products(
     return {"items": items[start:start + page_size], "total": total, "page": page, "page_size": page_size, "query": q}
 
 
-@search_router.get("/suggestions")
+@search_router.get("/suggestions", response_model=SearchSuggestionsResponse)
 async def search_suggestions(
-    q: str = Query(..., min_length=1),
-    limit: int = 20,
+    q: str = Query(..., min_length=1, max_length=200),
+    limit: int = Query(20, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
 ):
     query_base_hint = _query_market_base_hint(q)
-    rows = await _search_candidate_rows(db, q, 1000)
+    rows = await _search_candidate_rows(db, q, SEARCH_CANDIDATE_LIMIT)
     grouped = {}
     for product, competitor_name in rows:
         identity = _product_market_identity(product, base_hint=query_base_hint)
@@ -180,35 +195,58 @@ async def search_suggestions(
             "competitors": set(),
             "variants": set(),
             "match_score": score,
+            "prices_by_currency": {},
         })
         group["competitors"].add(competitor_name)
         group["variants"].add(product.title)
         group["match_score"] = max(group["match_score"], score)
-        if product.current_price is not None and (group["best_price"] is None or product.current_price < group["best_price"]):
-            group["best_price"] = product.current_price
-            group["currency"] = product.currency
-            group["representative_product_id"] = product.id
-            group["image_url"] = product.image_url
+        if product.current_price is not None:
+            currency_best = group["prices_by_currency"].get(product.currency)
+            if currency_best is None or product.current_price < currency_best:
+                group["prices_by_currency"][product.currency] = product.current_price
+            # Preserve the familiar single-currency suggestion contract.  When
+            # currencies differ, do not compare their numeric values.
+            if product.currency == group["currency"] and (
+                group["best_price"] is None or product.current_price < group["best_price"]
+            ):
+                group["best_price"] = product.current_price
+                group["representative_product_id"] = product.id
+                group["image_url"] = product.image_url
 
     items = []
     for group in grouped.values():
         item = dict(group)
+        if len(group["prices_by_currency"]) > 1:
+            item["best_price"] = None
+            item["currency"] = "MULTI"
         item["competitors_count"] = len(group["competitors"])
         item["competitors"] = sorted(group["competitors"])
         item["variants"] = sorted(group["variants"])[:5]
         item["match_score"] = round(group["match_score"], 3)
+        item["prices_by_currency"] = [
+            {"currency": currency, "lowest_observed_price": price}
+            for currency, price in sorted(group["prices_by_currency"].items())
+        ]
         items.append(item)
 
     items.sort(key=lambda item: (-item["match_score"], -item["competitors_count"], item["best_price"] is None, item["best_price"] or 0))
-    return {"items": items[:limit], "total": len(items), "query": q}
+    return {
+        "items": items[:limit],
+        "total": len(items),
+        "query": q,
+        "candidates_considered": len(rows),
+        "candidate_limit_reached": len(rows) == SEARCH_CANDIDATE_LIMIT,
+    }
 
 
-@search_router.get("/compare")
+@search_router.get("/compare", response_model=SearchCompareResponse)
 async def compare_product(
-    q: Optional[str] = None,
+    q: Optional[str] = Query(default=None, min_length=1, max_length=200),
     product_id: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
+    if q is None and product_id is None:
+        raise HTTPException(status_code=422, detail="Provide q or product_id.")
     return await _compare_product_response(db, q=q, product_id=product_id)
 
 
@@ -511,64 +549,199 @@ async def _compare_product_response(
         )
         target_product = ranked[0][0] if ranked else None
     if not target_product:
-        return {"target": None, "items": [], "total_matches": 0}
+        return {
+            "target": None,
+            "items": [],
+            "total_matches": 0,
+            "market_summary": _empty_market_summary(),
+        }
 
     target_identity = _product_market_identity(target_product)
     aliases = _comparison_aliases(target_identity["base"])
-    competitors = (await db.execute(select(Competitor).where(Competitor.active == True))).scalars().all()
-    rows = (await db.execute(
-        select(Product, Competitor.name.label("cname"))
-        .join(Competitor, Product.competitor_id == Competitor.id)
-        .where(Product.active == True)
-    )).all()
+    competitor_rows = await _competitors_with_search_evidence(db)
+    competitors = [row[0] for row in competitor_rows]
+    evidence_ids = {
+        row[0].id: {
+            "complete": row.latest_complete_id,
+            "partial": row.latest_partial_id,
+            "failed": row.latest_failed_id,
+            "terminal": row.latest_terminal_id,
+            "active": row.active_run_id,
+        }
+        for row in competitor_rows
+    }
+    rows = await _comparison_fast_path_rows(db, target_identity)
 
     best_by_competitor = {}
-    for product, competitor_name in rows:
-        candidate_identity = _product_market_identity(product, base_hint=target_identity["base"])
-        if not _collections_compatible(target_identity, candidate_identity):
-            continue
-        if candidate_identity["mutation"] != target_identity["mutation"]:
-            continue
-        candidate_aliases = _comparison_aliases(candidate_identity["base"])
-        score = max(
-            _comparison_score(target_alias, candidate_alias)
-            for target_alias in aliases
-            for candidate_alias in candidate_aliases
-        )
-        if score < 0.86:
-            continue
-        current = best_by_competitor.get(product.competitor_id)
-        if not current or score > current["match_score"] or (
-            score == current["match_score"] and product.current_price is not None and (
-                current["product"]["current_price"] is None or product.current_price < current["product"]["current_price"]
-            )
-        ):
-            item = ProductOut.model_validate(product).model_dump()
-            item["competitor_name"] = competitor_name
-            best_by_competitor[product.competitor_id] = {
-                "competitor_id": product.competitor_id,
-                "competitor_name": competitor_name,
-                "match_score": round(score, 3),
-                "product": item,
-            }
+    identity_cache: dict[tuple[str, str | None], dict] = {}
 
+    def consider(candidate_rows) -> None:
+        for product, competitor_name in candidate_rows:
+            identity_key = (product.normalized_title, product.category)
+            candidate_identity = identity_cache.get(identity_key)
+            if candidate_identity is None:
+                candidate_identity = _product_market_identity(
+                    product, base_hint=target_identity["base"]
+                )
+                identity_cache[identity_key] = candidate_identity
+            if not _collections_compatible(target_identity, candidate_identity):
+                continue
+            if candidate_identity["mutation"] != target_identity["mutation"]:
+                continue
+            candidate_aliases = _comparison_aliases(candidate_identity["base"])
+            score = max(
+                _comparison_score(target_alias, candidate_alias)
+                for target_alias in aliases
+                for candidate_alias in candidate_aliases
+            )
+            if score < 0.86:
+                continue
+            current = best_by_competitor.get(product.competitor_id)
+            if not current or score > current["match_score"] or (
+                score == current["match_score"] and product.current_price is not None and (
+                    current["product"]["current_price"] is None
+                    or product.current_price < current["product"]["current_price"]
+                )
+            ):
+                item = ProductOut.model_validate(product).model_dump()
+                item["competitor_name"] = competitor_name
+                best_by_competitor[product.competitor_id] = {
+                    "competitor_id": product.competitor_id,
+                    "competitor_name": competitor_name,
+                    "match_score": round(score, 3),
+                    "raw_match_score": score,
+                    "product_model": product,
+                    "product": item,
+                }
+
+    consider(rows)
+    unresolved_competitor_ids = [
+        competitor.id
+        for competitor in competitors
+        if (
+            competitor.id not in best_by_competitor
+            or best_by_competitor[competitor.id]["raw_match_score"] < 1.0
+        )
+    ]
+    if unresolved_competitor_ids:
+        for competitor_id in unresolved_competitor_ids:
+            best_by_competitor.pop(competitor_id, None)
+        consider(await _comparison_fallback_rows(db, unresolved_competitor_ids))
+
+    evidence_run_ids = {
+        run_id
+        for values in evidence_ids.values()
+        for run_id in values.values()
+        if run_id is not None
+    }
+    producing_run_ids = {
+        match["product_model"].last_observed_run_id
+        for match in best_by_competitor.values()
+        if match["product_model"].last_observed_run_id is not None
+    }
+    runs_by_id = await _load_search_runs(db, evidence_run_ids | producing_run_ids)
+    snapshots_by_product = await _load_recent_price_snapshots(
+        db,
+        [match["product_model"].id for match in best_by_competitor.values()],
+    )
+
+    now = datetime.now(timezone.utc)
     items = []
     for competitor in competitors:
         match = best_by_competitor.get(competitor.id)
-        items.append(match or {
+        ids = evidence_ids[competitor.id]
+        evidence = CompetitorEvidence(
+            latest_complete=_run_evidence(runs_by_id.get(ids["complete"])),
+            latest_partial=_run_evidence(runs_by_id.get(ids["partial"])),
+            latest_failed=_run_evidence(runs_by_id.get(ids["failed"])),
+            latest_terminal=_run_evidence(runs_by_id.get(ids["terminal"])),
+            active_run=_run_evidence(runs_by_id.get(ids["active"])),
+        )
+        product = match["product_model"] if match else None
+        assessment = assess_search_trust(
+            evidence=evidence,
+            product_observed_at=product.last_observed_at if product else None,
+            product_run_id=product.last_observed_run_id if product else None,
+            has_price=bool(product and product.current_price is not None),
+            stock_status=product.stock_status if product else None,
+            now=now,
+        )
+        latest_terminal = evidence.latest_terminal
+        trust = {
+            "coverage_state": assessment.coverage_state,
+            "price_reliability": assessment.price_reliability,
+            "reliable": assessment.reliable,
+            "trustworthy_current_observation": assessment.trustworthy_current_observation,
+            "product_observed_at": product.last_observed_at if product else None,
+            "product_observation_age_seconds": assessment.product_observation_age_seconds,
+            "latest_complete_at": (
+                evidence.latest_complete.observation_completed_at
+                if evidence.latest_complete else None
+            ),
+            "complete_coverage_age_seconds": assessment.complete_coverage_age_seconds,
+            "latest_partial_at": (
+                evidence.latest_partial.observation_completed_at
+                if evidence.latest_partial else None
+            ),
+            "last_failed_at": (
+                evidence.latest_failed.terminal_at if evidence.latest_failed else None
+            ),
+            "required_cycle_date": assessment.required_cycle_date.isoformat(),
+            "current_completeness": latest_terminal.completeness if latest_terminal else "unknown",
+            "warning": assessment.warning,
+            "producing_run": _serialize_run_evidence(
+                _run_evidence(runs_by_id.get(product.last_observed_run_id)) if product else None
+            ),
+            "latest_complete_run": _serialize_run_evidence(evidence.latest_complete),
+            "latest_partial_run": _serialize_run_evidence(evidence.latest_partial),
+            "latest_failed_run": _serialize_run_evidence(evidence.latest_failed),
+            "active_sync": _serialize_run_evidence(evidence.active_run),
+        }
+        items.append({
             "competitor_id": competitor.id,
             "competitor_name": competitor.name,
-            "match_score": 0,
-            "product": None,
+            "match_score": match["match_score"] if match else 0,
+            "product": match["product"] if match else None,
+            "trust": trust,
+            "price_change": (
+                _price_change_context(product, snapshots_by_product.get(product.id, []))
+                if product else None
+            ),
+            "reference_currency": None,
+            "difference_from_reliable_low": None,
+            "difference_percentage": None,
         })
 
+    if not include_unmatched:
+        items = [item for item in items if item["product"]]
+    market_summary = _market_summary(items)
+    reliable_low_by_currency = {
+        summary["currency"]: summary["lowest_reliable_price"]
+        for summary in market_summary["currencies"]
+        if summary["lowest_reliable_price"] is not None
+    }
+    for item in items:
+        product = item["product"]
+        if not product or product["current_price"] is None:
+            continue
+        currency = product["currency"]
+        reference = reliable_low_by_currency.get(currency)
+        if reference is None:
+            continue
+        difference = product["current_price"] - reference
+        item["reference_currency"] = currency
+        item["difference_from_reliable_low"] = difference
+        item["difference_percentage"] = (
+            round(float(difference / reference * 100), 2) if reference else None
+        )
+
     items.sort(key=lambda item: (
+        not item["trust"]["reliable"],
         item["product"] is None,
         item["product"]["current_price"] is None if item["product"] else True,
         item["product"]["current_price"] if item["product"] else 0,
+        item["competitor_name"],
     ))
-    if not include_unmatched:
-        items = [item for item in items if item["product"]]
     target = ProductOut.model_validate(target_product).model_dump()
     return {
         "target": target,
@@ -576,6 +749,278 @@ async def _compare_product_response(
         "aliases": sorted(aliases),
         "items": items,
         "total_matches": sum(1 for item in items if item["product"]),
+        "market_summary": market_summary,
+    }
+
+
+async def _comparison_fast_path_rows(
+    db: AsyncSession,
+    target_identity: dict,
+):
+    """Find likely exact-alias rows cheaply before the compatibility fallback.
+
+    This filter is intentionally not treated as exhaustive.  Any competitor without
+    a score-1 match is searched by ``_comparison_fallback_rows``, preserving the
+    regression-protected collection/mutation/fuzzy matcher exactly.
+    """
+
+    descriptor_tokens = {
+        "knife", "knive", "knives", "gun", "guns", "weapon", "weapons", "godly", "mm2"
+    }
+    base_tokens = [
+        token for token in target_identity["base"].split()
+        if len(token) >= 3 and token not in descriptor_tokens
+    ]
+    prefixes = sorted(
+        {token if len(token) <= 5 else token[:5] for token in base_tokens},
+        key=lambda token: (-len(token), token),
+    )[:3]
+    query = (
+        select(Product, Competitor.name.label("cname"))
+        .join(Competitor, Product.competitor_id == Competitor.id)
+        .where(Product.active == True, Competitor.active == True)
+    )
+    if prefixes:
+        query = query.where(or_(*[
+            Product.normalized_title.ilike(f"%{prefix}%") for prefix in prefixes
+        ]))
+    return (await db.execute(query)).all()
+
+
+async def _comparison_fallback_rows(
+    db: AsyncSession,
+    competitor_ids: list[int],
+):
+    return (await db.execute(
+        select(Product, Competitor.name.label("cname"))
+        .join(Competitor, Product.competitor_id == Competitor.id)
+        .where(
+            Product.active == True,
+            Competitor.active == True,
+            Product.competitor_id.in_(competitor_ids),
+        )
+    )).all()
+
+
+async def _competitors_with_search_evidence(db: AsyncSession):
+    def latest_id(*conditions, order_by):
+        return (
+            select(ScrapeRun.id)
+            .where(ScrapeRun.competitor_id == Competitor.id, *conditions)
+            .order_by(*order_by)
+            .limit(1)
+            .correlate(Competitor)
+            .scalar_subquery()
+        )
+
+    complete_id = latest_id(
+        ScrapeRun.status == "success",
+        ScrapeRun.completeness == "complete",
+        order_by=(ScrapeRun.observation_completed_at.desc().nullslast(), ScrapeRun.id.desc()),
+    )
+    partial_id = latest_id(
+        ScrapeRun.status == "success",
+        ScrapeRun.completeness.in_(("partial", "suspicious_empty")),
+        order_by=(ScrapeRun.observation_completed_at.desc().nullslast(), ScrapeRun.id.desc()),
+    )
+    failed_id = latest_id(
+        ScrapeRun.status.in_(("failed", "abandoned")),
+        order_by=(ScrapeRun.terminal_at.desc().nullslast(), ScrapeRun.id.desc()),
+    )
+    terminal_id = latest_id(
+        ScrapeRun.status.in_(("success", "failed", "abandoned")),
+        order_by=(ScrapeRun.terminal_at.desc().nullslast(), ScrapeRun.id.desc()),
+    )
+    active_id = latest_id(
+        ScrapeRun.status.in_(("queued", "running", "retry_wait")),
+        order_by=(ScrapeRun.queued_at.desc(), ScrapeRun.id.desc()),
+    )
+    return (await db.execute(
+        select(
+            Competitor,
+            complete_id.label("latest_complete_id"),
+            partial_id.label("latest_partial_id"),
+            failed_id.label("latest_failed_id"),
+            terminal_id.label("latest_terminal_id"),
+            active_id.label("active_run_id"),
+        )
+        .where(Competitor.active == True)
+        .order_by(Competitor.name)
+    )).all()
+
+
+async def _load_search_runs(db: AsyncSession, run_ids: set[int]) -> dict[int, ScrapeRun]:
+    if not run_ids:
+        return {}
+    runs = (await db.execute(select(ScrapeRun).where(ScrapeRun.id.in_(run_ids)))).scalars().all()
+    return {run.id: run for run in runs}
+
+
+async def _load_recent_price_snapshots(
+    db: AsyncSession,
+    product_ids: list[int],
+) -> dict[int, list[ProductSnapshot]]:
+    if not product_ids:
+        return {}
+    snapshot_order = func.coalesce(
+        ProductSnapshot.observed_at, ProductSnapshot.checked_at
+    ).desc()
+    ranked = (
+        select(
+            ProductSnapshot.id.label("snapshot_id"),
+            func.row_number().over(
+                partition_by=ProductSnapshot.product_id,
+                order_by=(snapshot_order, ProductSnapshot.id.desc()),
+            ).label("snapshot_rank"),
+        )
+        .where(ProductSnapshot.product_id.in_(product_ids))
+        .subquery()
+    )
+    snapshots = (await db.execute(
+        select(ProductSnapshot)
+        .join(ranked, ranked.c.snapshot_id == ProductSnapshot.id)
+        .where(ranked.c.snapshot_rank <= 10)
+        .order_by(
+            ProductSnapshot.product_id,
+            snapshot_order,
+            ProductSnapshot.id.desc(),
+        )
+    )).scalars().all()
+    by_product: dict[int, list[ProductSnapshot]] = {}
+    for snapshot in snapshots:
+        by_product.setdefault(snapshot.product_id, []).append(snapshot)
+    return by_product
+
+
+def _run_evidence(run: ScrapeRun | None) -> RunEvidence | None:
+    if run is None:
+        return None
+    return RunEvidence(
+        run_id=run.id,
+        status=run.status,
+        completeness=run.completeness,
+        observation_completed_at=run.observation_completed_at,
+        terminal_at=run.terminal_at,
+        failure_category=run.failure_category,
+        failure_reason=run.error_message,
+    )
+
+
+def _serialize_run_evidence(run: RunEvidence | None) -> dict | None:
+    if run is None:
+        return None
+    return {
+        "run_id": run.run_id,
+        "status": run.status,
+        "completeness": run.completeness,
+        "observation_completed_at": run.observation_completed_at,
+        "terminal_at": run.terminal_at,
+        "failure_category": run.failure_category,
+        "failure_reason": run.failure_reason,
+    }
+
+
+def _price_change_context(
+    product: Product,
+    snapshots: list[ProductSnapshot],
+) -> dict | None:
+    if product.current_price is None:
+        return None
+    current_index = next((
+        index for index, snapshot in enumerate(snapshots)
+        if snapshot.price == product.current_price and snapshot.currency == product.currency
+    ), None)
+    if current_index is None:
+        return None
+    current_snapshot = snapshots[current_index]
+    previous = next((
+        snapshot for snapshot in snapshots[current_index + 1:]
+        if snapshot.price is not None
+        and snapshot.currency == product.currency
+        and snapshot.price != product.current_price
+    ), None)
+    if previous is None or previous.price is None:
+        return None
+    difference = product.current_price - previous.price
+    changed_at = current_snapshot.observed_at or current_snapshot.checked_at
+    return {
+        "previous_price": previous.price,
+        "current_price": product.current_price,
+        "currency": product.currency,
+        "direction": "increase" if difference > 0 else "decrease",
+        "amount": abs(difference),
+        "percentage": (
+            round(abs(float(difference / previous.price * 100)), 2)
+            if previous.price else None
+        ),
+        "changed_at": changed_at,
+        "scrape_run_id": current_snapshot.scrape_run_id,
+    }
+
+
+def _market_summary(items: list[dict]) -> dict:
+    priced_by_currency: dict[str, list[dict]] = {}
+    for item in items:
+        product = item["product"]
+        if product and product["current_price"] is not None:
+            priced_by_currency.setdefault(product["currency"], []).append(item)
+
+    currencies = []
+    for currency, priced_items in sorted(priced_by_currency.items()):
+        reliable_items = [item for item in priced_items if item["trust"]["reliable"]]
+        observed_low = min(priced_items, key=lambda item: item["product"]["current_price"])
+        reliable_low = (
+            min(reliable_items, key=lambda item: item["product"]["current_price"])
+            if reliable_items else None
+        )
+        reliable_prices = sorted(item["product"]["current_price"] for item in reliable_items)
+        currencies.append({
+            "currency": currency,
+            "lowest_reliable_price": (
+                reliable_low["product"]["current_price"] if reliable_low else None
+            ),
+            "lowest_reliable_competitor_id": reliable_low["competitor_id"] if reliable_low else None,
+            "lowest_reliable_competitor_name": reliable_low["competitor_name"] if reliable_low else None,
+            "lowest_observed_price": observed_low["product"]["current_price"],
+            "lowest_observed_competitor_id": observed_low["competitor_id"],
+            "lowest_observed_competitor_name": observed_low["competitor_name"],
+            "highest_reliable_price": reliable_prices[-1] if reliable_prices else None,
+            "median_reliable_price": _decimal_median(reliable_prices),
+            "observed_price_count": len(priced_items),
+            "reliable_price_count": len(reliable_items),
+        })
+
+    matched = [item for item in items if item["product"]]
+    trustworthy = [
+        item for item in matched if item["trust"]["trustworthy_current_observation"]
+    ]
+    return {
+        "currencies": currencies,
+        "competitors_carrying": len(matched),
+        "trustworthy_current": len(trustworthy),
+        "degraded_or_unknown": len(matched) - len(trustworthy),
+        "syncing_competitors": sum(1 for item in items if item["trust"]["active_sync"]),
+        "no_reliable_prices": not any(item["trust"]["reliable"] for item in matched),
+    }
+
+
+def _decimal_median(values: list[Decimal]) -> Decimal | None:
+    if not values:
+        return None
+    midpoint = len(values) // 2
+    if len(values) % 2:
+        return values[midpoint]
+    return (values[midpoint - 1] + values[midpoint]) / Decimal("2")
+
+
+def _empty_market_summary() -> dict:
+    return {
+        "currencies": [],
+        "competitors_carrying": 0,
+        "trustworthy_current": 0,
+        "degraded_or_unknown": 0,
+        "syncing_competitors": 0,
+        "no_reliable_prices": True,
     }
 
 
@@ -599,7 +1044,7 @@ async def _search_candidate_rows(db: AsyncSession, q: str, limit: int):
         ]
         if token_filters:
             query = query.where(or_(*token_filters))
-    query = query.order_by(Product.last_checked_at.desc()).limit(limit)
+    query = query.order_by(Product.last_checked_at.desc(), Product.id.desc()).limit(limit)
     return (await db.execute(query)).all()
 
 

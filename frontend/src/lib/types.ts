@@ -98,12 +98,18 @@ export interface SearchSuggestion {
   competitors_count: number
   variants: string[]
   match_score: number
+  prices_by_currency: Array<{
+    currency: string
+    lowest_observed_price: Price
+  }>
 }
 
 export interface SearchSuggestionsResponse {
   items: SearchSuggestion[]
   total: number
   query: string
+  candidates_considered: number
+  candidate_limit_reached: boolean
 }
 
 /**
@@ -117,6 +123,80 @@ export interface CompareRow {
   competitor_name: string
   match_score: number
   product: Product | null
+  trust: SearchTrustMetadata
+  price_change: SearchPriceChange | null
+  reference_currency: string | null
+  difference_from_reliable_low: Price
+  difference_percentage: number | null
+}
+
+export type SearchCoverageState =
+  | 'current_complete' | 'partial' | 'suspicious_empty'
+  | 'failed' | 'stale' | 'unknown'
+
+export interface SearchRunEvidence {
+  run_id: number
+  status: string
+  completeness: AcquisitionCompleteness
+  observation_completed_at: Timestamp | null
+  terminal_at: Timestamp | null
+  failure_category: string | null
+  failure_reason: string | null
+}
+
+export interface SearchTrustMetadata {
+  coverage_state: SearchCoverageState
+  price_reliability: 'reliable' | 'degraded' | 'unknown' | 'unavailable'
+  reliable: boolean
+  trustworthy_current_observation: boolean
+  product_observed_at: Timestamp | null
+  product_observation_age_seconds: number | null
+  latest_complete_at: Timestamp | null
+  complete_coverage_age_seconds: number | null
+  latest_partial_at: Timestamp | null
+  last_failed_at: Timestamp | null
+  required_cycle_date: string
+  current_completeness: AcquisitionCompleteness
+  warning: string | null
+  producing_run: SearchRunEvidence | null
+  latest_complete_run: SearchRunEvidence | null
+  latest_partial_run: SearchRunEvidence | null
+  latest_failed_run: SearchRunEvidence | null
+  active_sync: SearchRunEvidence | null
+}
+
+export interface SearchPriceChange {
+  previous_price: number
+  current_price: number
+  currency: string
+  direction: 'increase' | 'decrease'
+  amount: number
+  percentage: number | null
+  changed_at: Timestamp
+  scrape_run_id: number | null
+}
+
+export interface SearchCurrencySummary {
+  currency: string
+  lowest_reliable_price: Price
+  lowest_reliable_competitor_id: number | null
+  lowest_reliable_competitor_name: string | null
+  lowest_observed_price: Price
+  lowest_observed_competitor_id: number | null
+  lowest_observed_competitor_name: string | null
+  highest_reliable_price: Price
+  median_reliable_price: Price
+  observed_price_count: number
+  reliable_price_count: number
+}
+
+export interface SearchMarketSummary {
+  currencies: SearchCurrencySummary[]
+  competitors_carrying: number
+  trustworthy_current: number
+  degraded_or_unknown: number
+  syncing_competitors: number
+  no_reliable_prices: boolean
 }
 
 export interface MarketIdentity {
@@ -136,6 +216,7 @@ export interface CompareResponse {
   aliases?: string[]
   items: CompareRow[]
   total_matches: number
+  market_summary: SearchMarketSummary
 }
 
 export interface BatchCompareCompetitorPrice {

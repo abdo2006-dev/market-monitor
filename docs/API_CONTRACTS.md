@@ -24,8 +24,8 @@ The table below is the Phase 0 inventory. New Sync V2 routes follow it.
 | GET | `/api/products/{product_id}/history` | `get_product_history` | `List[SnapshotOut]` |
 | GET | `/api/events` | `list_events` | **none** |
 | GET | `/api/search/products` | `search_products` | **none** |
-| GET | `/api/search/suggestions` | `search_suggestions` | **none** |
-| GET | `/api/search/compare` | `compare_product` | **none** |
+| GET | `/api/search/suggestions` | `search_suggestions` | `SearchSuggestionsResponse` |
+| GET | `/api/search/compare` | `compare_product` | `SearchCompareResponse` |
 | GET | `/api/search/batch-compare` | `batch_compare_products_get` | **none** |
 | POST | `/api/search/batch-compare` | `batch_compare_products` | **none** |
 | GET | `/api/search/batch-compare-summary` | `batch_compare_summary_get` | **none** |
@@ -80,6 +80,32 @@ Existing product responses now add nullable `last_observed_at` and
 Legacy rows remain null; V2 reconciliation supplies real values. These additive fields are
 the per-product freshness/provenance foundation for Phase 1C.
 
+### 1.2 Phase 1C Search contracts
+
+| Method | Path | Response model | Semantics |
+|---|---|---|---|
+| GET | `/api/search/suggestions` | `SearchSuggestionsResponse` | Grouped logical products, deterministic candidate-cap telemetry, and currency-separated observed lows. |
+| GET | `/api/search/compare` | `SearchCompareResponse` | One row per active competitor plus trust, run evidence, direct price change, and backend-owned currency market summaries. |
+
+`/compare` requires one target selector in normal UI use: `product_id` for a chosen
+suggestion or `q` for server target selection. Supplying neither returns 422.
+
+Each comparison row retains the existing nullable `product` shape and adds:
+
+- `trust.coverage_state`, price reliability, exact observation/coverage timestamps and
+  ages, latest partial/failure evidence, producing run, and active Sync;
+- nullable direct-snapshot `price_change`;
+- same-currency difference from `lowest_reliable_price`, when that reference exists.
+
+`market_summary.currencies[]` owns lowest reliable, lowest observed, highest reliable,
+median reliable, sellers, and counts. Search price fields serialize as JSON numbers to
+preserve the established frontend contract. Currencies are separate entries and never
+converted or compared. Full rules: `docs/SEARCH_ARCHITECTURE.md`.
+
+The TypeScript functions and `MarketSearch.tsx` consume matching explicit types. This is
+the smallest safe critical-route contract improvement; application-wide OpenAPI type
+generation remains deferred until unrelated untyped routes are modeled.
+
 ---
 
 ## 2. Known contract defects
@@ -110,12 +136,12 @@ scan that never ran.
 
 `/api/products`, `/api/events`, `/api/search/products` all return
 `{items, total, page, page_size}`. None uses `PaginatedResponse`. `/api/search/products`
-additionally returns `query`; `/api/search/suggestions` returns `{items, total, query}`
-with no paging at all.
+additionally returns `query`; `/api/search/suggestions` returns grouped items plus query
+and explicit candidate-cap telemetry, with no paging.
 
 `/api/products/{id}/history` returns a bare array, unpaginated and unbounded.
 
-### 2.3 Filtering happens after pagination in search
+### 2.3 Filtering happens after pagination in legacy `/search/products`
 
 `search_products` (`search_dashboard_settings.py:98`) applies `LIMIT 1000` in SQL, scores
 in Python, drops anything below 0.34, and *then* paginates the survivors. `total` is the
@@ -125,10 +151,10 @@ silently truncate on large catalogues with no indication.
 ### 2.4 Prices cross the boundary as three different types
 
 `Decimal` in the database → `Decimal` in `ProductOut.current_price` → JSON number.
-But `sales-trends` (`:1004`) and `batch-compare-summary` (`:357`) explicitly cast to
-`float`, and `compare` returns `ProductOut.model_dump()` which keeps `Decimal`. The
-frontend receives numbers either way and treats them all as `number` — but the precision
-guarantee differs by endpoint.
+`sales-trends` and `batch-compare-summary` explicitly cast to `float`. Phase 1C Search
+response models also declare JSON-number prices to preserve its established TypeScript
+contract. Other routes still differ, so the application-wide precision guarantee remains
+inconsistent.
 
 ### 2.5 Error responses are unmodelled
 

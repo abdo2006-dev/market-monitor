@@ -59,7 +59,7 @@ export const getSearchSuggestions = (
 
 /** Pass `product_id` for an exact target, or `q` to let the backend pick one. */
 export const compareProduct = (
-  params: { q?: string; product_id?: number },
+  params: { product_id: number; q?: never } | { q: string; product_id?: never },
 ): Promise<CompareResponse> =>
   api.get('/search/compare', { params }).then(r => r.data)
 

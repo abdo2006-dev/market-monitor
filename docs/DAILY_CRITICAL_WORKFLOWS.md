@@ -36,28 +36,32 @@ Search features.
 
 ## 2. Market Search
 
-### How it works today
+### How it works after Phase 1C
 
 ```
 MarketSearch.tsx
-  → GET /api/search/suggestions?q=...        group candidate items
+  → debounced GET /api/search/suggestions?q=...  group candidate items
   → user picks one
-  → GET /api/search/compare?product_id=...   compare across competitors
+  → GET /api/search/compare?product_id=...       compare + trust + market summary
 ```
 
 Both are implemented in `api/search_dashboard_settings.py`, which also contains
-the entire identity/matching engine (`:606`–`:811`) and a hardcoded Roblox
-vocabulary (`:33`–`:93`).
+the regression-protected identity/matching engine and a hardcoded Roblox vocabulary.
+Pure daily-cycle trust classification is in `domain/search_trust.py`.
 
-**Suggestions** (`:150`) loads up to 1,000 candidate rows via `ILIKE` on fuzzy
+**Suggestions** loads up to 1,000 candidate rows via `ILIKE` on fuzzy
 token prefixes, scores each in Python, drops anything below 0.34, then groups by
 a computed market identity `(collection, base, mutation)`. Grouping is what makes
-"Batwing at three stores" one row rather than three.
+"Batwing at three stores" one row rather than three. The cap is now explicit in the
+typed response/UI, candidate ordering is deterministic, and mixed currencies are not
+numerically compared.
 
-**Compare** (`:495`) picks a target product, then loads **every active product in
-the database** and scores each against the target, keeping the best match per
-competitor above a 0.86 threshold. Competitors with no match are returned with
-`product: null` so the UI can show full coverage.
+**Compare** picks a target product and uses a base-token SQL fast path for score-1 alias
+matches. Every unresolved competitor falls back across all of its active products through
+the unchanged collection/mutation/0.86 matcher. It keeps the best match per competitor and
+returns `product: null` for unmatched active competitors.
+It also attaches Sync coverage evidence, direct snapshot price-change context, and
+currency-separated market statistics.
 
 ### Dependencies
 
@@ -65,32 +69,35 @@ competitor above a 0.86 threshold. Competitors with no match are returned with
   written by Sync.
 - The identity engine's hardcoded vocabulary: `COLLECTION_ALIASES`,
   `COLLECTION_LABELS`, `MUTATION_PHRASES`, `GENERIC_COLLECTION_TOKENS`.
-- Nothing else. Search performs no I/O beyond PostgreSQL.
+- `scrape_runs` completeness/observation/terminal evidence and active state.
+- `product_snapshots` direct change history.
+- Nothing outside PostgreSQL; Search does not scrape.
 
-### Known failure modes
+### Phase 1C status and remaining limitations
 
-| # | Failure | Evidence |
+| # | Status | Evidence |
 |---|---|---|
-| S1 | **Search silently reflects stale data.** No freshness filter, no staleness signal in the response. A month-old price ranks above a fresh one purely by being lower. | `test_compare_ignores_freshness` |
-| S2 | **Compare loads the entire active product table per query**, then scores in Python (`:519`). Batch compare calls it per query, so N queries = N full scans. Mitigated for batch by `_batch_compare_summary_response` loading once (`:288`), but `/search/compare` itself is unmitigated. | `:519`, `:271` |
-| S3 | **Search truncates at 1,000 rows before scoring** (`:128`, `:602`) with no indication. On a larger catalogue, relevant items are silently dropped. | `:602` |
-| S4 | **Business vocabulary is hardcoded in source.** Adding a new Roblox game requires a code change and a deploy, in three separate files. | `:33`–`:93`, `scraper.py:942`, `exports.py:170` |
-| S5 | `/search/compare` has no required parameter; calling it with neither `q` nor `product_id` returns `200` with an empty envelope instead of `422`. | `test_compare_with_no_arguments_returns_empty_envelope` |
-| S6 | Unmatched-competitor rows carry `match_score: 0` and `product: null`, but matched rows nest the product under `product` — the two shapes differ and are untyped on the frontend. | `docs/API_CONTRACTS.md` §2 |
+| S1 | **Resolved.** Stored stale/partial/failed/legacy prices remain visible but are excluded from the reliable range and carry absolute observation/coverage ages. | freshness/summary Search tests |
+| S2 | **Resolved for the common interactive path.** A 15,000-row exact-alias profile fell from 967.83 ms to 91.40 ms median. Unresolved competitors retain the complete fuzzy fallback. Batch-summary behavior is unchanged. | `docs/SEARCH_ARCHITECTURE.md` §6 |
+| S3 | **Mitigated, not removed.** Suggestions still cap at 1,000, but the API/UI now disclose it and recommend a narrower query. | typed suggestion metadata |
+| S4 | **Open.** Business vocabulary remains hardcoded/duplicated; Phase 1C did not risk a taxonomy migration. | `SEARCH_ARCHITECTURE.md` §8 |
+| S5 | **Resolved.** Compare with neither `q` nor `product_id` returns 422. | `test_compare_with_no_arguments_is_rejected` |
+| S6 | **Resolved for Search.** Suggestions/compare have Pydantic response models and matching TypeScript contracts; row trust is structured. | `docs/API_CONTRACTS.md` §1.2 |
 
-### What Phase 1A verified
+### Regression protection
 
-23 regression tests in `backend/tests/critical/test_search_regression.py`, all
-passing, covering: exact name, imperfect spelling (`batwng`, `Batwin`), case and
-punctuation normalisation, mutation variants kept separate, the same product
-across three competitors grouped into one suggestion, best-price selection,
-null-price handling, inactive products excluded, inactive competitors excluded,
-cross-collection matches blocked, unrelated products not merged, no-results,
-empty query rejected, compare-by-id, batch compare (JSON/markdown/CSV), the
-100-query cap, and the freshness blind spot.
+The expanded critical suite protects the original matching/grouping/batch behavior plus
+collection separation, mixed currencies, current/partial/suspicious/failed/stale/legacy
+evidence, active Sync, reliable versus observed statistics, stock eligibility, and direct
+snapshot price changes. Frontend tests cover loading, success, degradation, no reliable
+price, no suggestions, API error, active Sync, and truthful accepted-request wording.
 
-**The matching algorithm was deliberately not changed.** These tests characterise
-it so that a future change is visible.
+The regression-protected matching scores and thresholds were not rewritten. A guarded
+fast path resolves only definitive score-1 aliases; unresolved competitors still execute
+the complete prior matcher.
+
+Full semantics, measured performance, query plans, and limitations are in
+`docs/SEARCH_ARCHITECTURE.md`.
 
 ---
 
@@ -299,8 +306,8 @@ produces a removed signal in sales trends.
 ## 5. Data freshness (Part D)
 
 The owner makes pricing decisions from this application. **A price without freshness
-information is potentially misleading.** Phase 1B.2 now persists and exposes the minimum
-evidence; Phase 1C will apply it to Search.
+information is potentially misleading.** Phase 1B.2 persists the minimum evidence;
+Phase 1C now applies it to Search.
 
 ### 5.1 What can be derived reliably today
 
@@ -308,7 +315,7 @@ evidence; Phase 1C will apply it to Search.
 |---|---|---|
 | Product last observed | `products.last_observed_at` + `last_observed_run_id` | **Yes for V2.** Server time at the product page/batch boundary; failed/unobserved results do not advance it. |
 | Product last seen | `products.last_seen_at` | **Yes**, and distinct from the above — a missing product's `last_checked_at` advances while `last_seen_at` does not. |
-| Observation time of the current price | `products.last_seen_at` | **Approximately.** The price was true as of the last sighting. |
+| Observation time of the current price | `products.last_observed_at` | **Yes for V2.** The price was true at the adapter's server-clock observation boundary. |
 | Price actually changed at | newest `product_snapshots.checked_at` | **Yes**, but only for products that have ever changed. |
 | Last attempted sync (per competitor) | `competitors.last_scan_at` | **Yes** — written on both success and failure. |
 | Last sync outcome | `competitors.last_scan_status` | **Yes** (`success` / `failed`). |
@@ -322,53 +329,23 @@ evidence; Phase 1C will apply it to Search.
 last failure, whether current coverage is complete, and the active run. It deliberately
 does not invent age thresholds.
 
-### 5.2 Minimal freshness model (target)
+### 5.2 Implemented Search trust model
 
-Deliberately small. Thresholds are **not** invented here — see §5.3.
+Search exposes competitor coverage as `current_complete`, `partial`,
+`suspicious_empty`, `failed`, `stale`, or `unknown`. A non-terminal run is shown
+independently as active Sync, because work in progress does not erase the prior evidence.
 
-```python
-class Freshness(StrEnum):
-    FRESH        # last successful sync within the competitor's expected interval
-    STALE        # older than that, by a configurable multiple
-    SYNCING      # a non-terminal ScrapeRun exists right now
-    PARTIAL      # last run succeeded but acquisition was known-incomplete
-    FAILED       # last run failed; the displayed price predates the failure
-    NEVER        # never synced
-```
+The accepted morning topology supplies the cadence: yesterday remains the required
+catalog cycle until the 08:47 Cairo recovery schedule, then today's complete observation
+is required. This replaces the rejected arbitrary minute threshold. Search still shows
+the exact product and complete-catalog ages so the user can evaluate the verdict.
 
-Derivation, per competitor:
+Only a current-complete product directly linked to the latest complete run, with a price,
+currency, and confirmed in-stock state, participates in `lowest_reliable_price`. Every
+other observed price stays visible and may become `lowest_observed_price`. Market
+statistics never combine currencies.
 
-| State | Rule |
-|---|---|
-| `NEVER` | `last_scan_at IS NULL` |
-| `SYNCING` | a `ScrapeRun` in a non-terminal state exists *(needs the state machine from ADR 0003)* |
-| `FAILED` | `last_scan_status = 'failed'` |
-| `PARTIAL` | latest successful run flagged incomplete *(needs a new column)* |
-| `STALE` | `now - last_successful_sync > stale_after` |
-| `FRESH` | otherwise |
-
-Per product, freshness is the **worse** of its competitor's state and its own
-`last_checked_at` age — a product can be stale even when its competitor synced
-successfully, if it was missing from recent scans.
-
-The required lifecycle, completeness, observation, and lineage fields were added by
-migration `0005_durable_sync_lifecycle`. A denormalised successful-scan column was not
-added because the current single-user query can derive it from indexed run history.
-
-**Where it surfaces:** Search compare rows, Export provenance (§3.1), and the
-competitor list. Search is the priority — that is where decisions are made.
-
-### 5.3 Do not invent thresholds yet
-
-"Stale" is meaningless without knowing the real sync cadence. `scan_frequency_minutes`
-defaults to 60, but the Vercel deployment runs one cron a day, so the *effective*
-cadence is 24h regardless of configuration.
-
-Deciding `stale_after` requires: the deployment topology decision (§7), and real
-scan durations from the benchmark (§6). Until both exist, express freshness as an
-**absolute age** ("checked 3 hours ago") rather than a judgement ("stale").
-Showing the number is honest; showing a verdict derived from a guessed threshold
-is not.
+Full rules: `docs/SEARCH_ARCHITECTURE.md` §3–4.
 
 ---
 
@@ -519,10 +496,12 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:543
 | `test_schema_authority.py` | 10 | Alembic is the sole schema authority |
 | `test_sync_regression.py` | 32 | reconciliation, idempotency, failure, concurrency and ordering |
 | `test_product_integrity.py` | 5 | identity contract, constraints, audit and consolidation |
-| `test_sync_lifecycle.py` | 29 | durable requests/claims/leases/retries, completeness, freshness, lineage, API/worker |
-| `test_search_regression.py` | 23 | matching, grouping, best price, freshness blind spot |
+| `test_sync_lifecycle.py` | 32 | durable requests/claims/leases/retries, completeness, freshness, lineage, API/worker |
+| `test_search_regression.py` | 35 | matching/guarded fallback/grouping, trust, currencies, reliable/observed summaries, snapshots, active Sync |
 | `test_export_regression.py` | 28 | validation, formats, fields, fallback provenance |
-| **total** | **127** | plus the 65 pre-existing unit tests = **192** |
+| **critical total** | **142** | plus 71 non-critical tests = **213 backend tests** |
+
+The frontend adds 8 Vitest/Testing Library cases for the daily Search interaction.
 
 Database-backed tests **skip** when `TEST_DATABASE_URL` is unset, and CI fails if
 that happens there (`.github/workflows/ci.yml`).

@@ -1,5 +1,5 @@
-from pydantic import BaseModel, HttpUrl, field_validator
-from typing import Optional, List, Any
+from pydantic import BaseModel, Field, HttpUrl, field_validator
+from typing import Optional, List, Any, Literal
 from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
@@ -179,6 +179,134 @@ class CompetitorFreshness(BaseModel):
     latest_partial_at: Optional[datetime] = None
     last_failed_at: Optional[datetime] = None
     active_run: Optional[SyncRunStatus] = None
+
+
+# ── Market Search ────────────────────────────────────────────────────────────
+
+class SearchSuggestionPrice(BaseModel):
+    currency: str
+    lowest_observed_price: Optional[float] = None
+
+
+class SearchSuggestionOut(BaseModel):
+    title: str
+    normalized_title: str
+    base_title: str
+    base_normalized_title: str
+    mutation: str
+    mutation_label: str
+    category: Optional[str] = None
+    representative_product_id: int
+    best_price: Optional[float] = None
+    currency: str
+    image_url: Optional[str] = None
+    competitors: List[str]
+    competitors_count: int
+    variants: List[str]
+    match_score: float
+    prices_by_currency: List[SearchSuggestionPrice] = Field(default_factory=list)
+
+
+class SearchSuggestionsResponse(BaseModel):
+    items: List[SearchSuggestionOut]
+    total: int
+    query: str
+    candidates_considered: int
+    candidate_limit_reached: bool
+
+
+class SearchRunEvidence(BaseModel):
+    run_id: int
+    status: str
+    completeness: str
+    observation_completed_at: Optional[datetime] = None
+    terminal_at: Optional[datetime] = None
+    failure_category: Optional[str] = None
+    failure_reason: Optional[str] = None
+
+
+class SearchTrustMetadata(BaseModel):
+    coverage_state: Literal[
+        "current_complete", "partial", "suspicious_empty", "failed", "stale", "unknown"
+    ]
+    price_reliability: Literal["reliable", "degraded", "unknown", "unavailable"]
+    reliable: bool
+    trustworthy_current_observation: bool
+    product_observed_at: Optional[datetime] = None
+    product_observation_age_seconds: Optional[int] = None
+    latest_complete_at: Optional[datetime] = None
+    complete_coverage_age_seconds: Optional[int] = None
+    latest_partial_at: Optional[datetime] = None
+    last_failed_at: Optional[datetime] = None
+    required_cycle_date: str
+    current_completeness: str
+    warning: Optional[str] = None
+    producing_run: Optional[SearchRunEvidence] = None
+    latest_complete_run: Optional[SearchRunEvidence] = None
+    latest_partial_run: Optional[SearchRunEvidence] = None
+    latest_failed_run: Optional[SearchRunEvidence] = None
+    active_sync: Optional[SearchRunEvidence] = None
+
+
+class SearchPriceChange(BaseModel):
+    previous_price: float
+    current_price: float
+    currency: str
+    direction: Literal["increase", "decrease"]
+    amount: float
+    percentage: Optional[float] = None
+    changed_at: datetime
+    scrape_run_id: Optional[int] = None
+
+
+class SearchProductOut(ProductOut):
+    """Search keeps the established JSON-number price contract."""
+
+    current_price: Optional[float] = None
+
+
+class SearchCompareRow(BaseModel):
+    competitor_id: int
+    competitor_name: str
+    match_score: float
+    product: Optional[SearchProductOut] = None
+    trust: SearchTrustMetadata
+    price_change: Optional[SearchPriceChange] = None
+    reference_currency: Optional[str] = None
+    difference_from_reliable_low: Optional[float] = None
+    difference_percentage: Optional[float] = None
+
+
+class SearchCurrencySummary(BaseModel):
+    currency: str
+    lowest_reliable_price: Optional[float] = None
+    lowest_reliable_competitor_id: Optional[int] = None
+    lowest_reliable_competitor_name: Optional[str] = None
+    lowest_observed_price: Optional[float] = None
+    lowest_observed_competitor_id: Optional[int] = None
+    lowest_observed_competitor_name: Optional[str] = None
+    highest_reliable_price: Optional[float] = None
+    median_reliable_price: Optional[float] = None
+    observed_price_count: int
+    reliable_price_count: int
+
+
+class SearchMarketSummary(BaseModel):
+    currencies: List[SearchCurrencySummary]
+    competitors_carrying: int
+    trustworthy_current: int
+    degraded_or_unknown: int
+    syncing_competitors: int
+    no_reliable_prices: bool
+
+
+class SearchCompareResponse(BaseModel):
+    target: Optional[SearchProductOut] = None
+    identity: Optional[dict] = None
+    aliases: Optional[List[str]] = None
+    items: List[SearchCompareRow]
+    total_matches: int
+    market_summary: SearchMarketSummary
 
 
 # ── Settings ─────────────────────────────────────────────────────────────────

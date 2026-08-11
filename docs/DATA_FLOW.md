@@ -149,18 +149,36 @@ Failure does not call product reconciliation, advance product observation times,
 missing/removal state. A retry uses the same durable run; a completed/obsolete claim token
 cannot create duplicate failure/change events.
 
-## Flow 8 — Status and Search freshness foundation
+## Flow 8 — Status and freshness-aware Search
 
 - `GET /api/sync/requests/{uuid}` aggregates queued/running/retrying/success/partial/failed.
 - `GET /api/sync/runs/{id}` exposes safe timestamps, attempts, counts, completeness, and
   failure detail.
 - `GET /api/sync/freshness` exposes last complete observation, latest partial observation,
   last failed attempt, coverage completeness, and any active run.
-- `products.last_observed_at` and `last_observed_run_id` identify current observation
-  provenance for Phase 1C.
+- `products.last_observed_at` and `last_observed_run_id` identify the run and external
+  time behind each current market fact.
 
-Search does not yet render or rank by this data. Export remains the existing synchronous
-flow and its provenance defect remains Phase 1D work.
+```text
+GET /api/search/compare
+  → choose the exact logical target with the existing matcher
+  → resolve score-1 aliases through a PostgreSQL fast path
+  → run the complete prior matcher for every unresolved competitor
+  → retain one matched product per active competitor
+  → load latest complete / partial / failed / terminal / active run IDs in one query
+  → load those run rows and direct product snapshots in bounded queries
+  → classify Cairo-cycle coverage and per-product price reliability
+  → calculate currency-isolated reliable and observed market summaries
+```
+
+Search now displays stored degraded observations rather than hiding them, but only
+current complete, directly observed, in-stock prices participate in the reliable range.
+Product observation age and complete-catalog age remain separate. Active Sync is an
+overlay; request acceptance never means refreshed. Full rules and measurements:
+`docs/SEARCH_ARCHITECTURE.md`.
+
+Export remains the existing synchronous flow and its provenance defect remains Phase 1D
+work.
 
 ## Flow 9 — Execution provider and notification boundaries
 

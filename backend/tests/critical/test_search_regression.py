@@ -4,15 +4,17 @@ C1 — Market Search regression coverage.
 Characterises the CURRENT behaviour of /api/search/suggestions,
 /api/search/compare and the batch-compare endpoints against a real database.
 
-Phase 1A deliberately does NOT rewrite the matching algorithm. These tests pin
-down what it does today — including where it is wrong — so that any future change
-is a visible, deliberate one. Cases that expose incorrect behaviour are marked
-BUG and assert what actually happens.
+Phase 1C preserves the regression-protected matching algorithm while adding
+trust/freshness contracts and a guarded compare fast path. These tests keep any
+future matching or market-semantics change visible and deliberate.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
+from app.models import ProductSnapshot, ScrapeRun
 from tests.conftest import requires_db
 from tests.critical.factories import hours_ago, make_competitor, make_product
 
@@ -47,6 +49,43 @@ async def seed_market(session):
 
     await session.commit()
     return alpha, beta, gamma
+
+
+async def make_search_run(
+    session,
+    competitor,
+    *,
+    status="success",
+    completeness="complete",
+    observed_at=None,
+    terminal_at=None,
+):
+    observed_at = observed_at or datetime.now(timezone.utc) - timedelta(minutes=5)
+    terminal_at = terminal_at or observed_at + timedelta(minutes=1)
+    run = ScrapeRun(
+        competitor_id=competitor.id,
+        queued_at=observed_at - timedelta(minutes=2),
+        started_at=observed_at - timedelta(minutes=1),
+        finished_at=terminal_at if status not in {"queued", "running", "retry_wait"} else None,
+        terminal_at=terminal_at if status not in {"queued", "running", "retry_wait"} else None,
+        status=status,
+        trigger="manual",
+        acquisition_started_at=observed_at - timedelta(minutes=1),
+        acquisition_completed_at=observed_at,
+        observation_started_at=observed_at,
+        observation_completed_at=(observed_at if status == "success" else None),
+        completeness=completeness,
+        products_found=1 if completeness != "suspicious_empty" else 0,
+        attempt_count=1 if status != "queued" else 0,
+    )
+    session.add(run)
+    await session.flush()
+    return run
+
+
+async def observe_product(product, run, observed_at=None):
+    product.last_observed_at = observed_at or run.observation_completed_at
+    product.last_observed_run_id = run.id
 
 
 # ── Suggestions ───────────────────────────────────────────────────────────────
@@ -165,6 +204,54 @@ async def test_suggestions_mutation_variants_are_separated(db_session, api_clien
     assert len(items) >= 2, "plain and Rainbow are different market items"
 
 
+async def test_suggestions_keep_same_title_in_different_collections_separate(
+    db_session, api_client
+):
+    alpha = await make_competitor(db_session, "Alpha", "https://alpha.example")
+    beta = await make_competitor(db_session, "Beta", "https://beta.example")
+    await make_product(
+        db_session, alpha, "Dragon", price="10.00", category="Adopt Me",
+        url="https://alpha.example/products/dragon",
+    )
+    await make_product(
+        db_session, beta, "Dragon", price="20.00", category="Blox Fruits",
+        url="https://beta.example/products/dragon",
+    )
+    await db_session.commit()
+
+    items = (await api_client.get(
+        "/api/search/suggestions", params={"q": "Dragon"}
+    )).json()["items"]
+    dragon_groups = [item for item in items if item["base_normalized_title"] == "dragon"]
+    assert {item["category"] for item in dragon_groups} == {"Adopt Me", "Blox Fruits"}
+
+
+async def test_suggestions_do_not_compare_numeric_prices_across_currencies(
+    db_session, api_client
+):
+    alpha = await make_competitor(db_session, "USD Store", "https://usd.example")
+    beta = await make_competitor(db_session, "EUR Store", "https://eur.example")
+    await make_product(
+        db_session, alpha, "Batwing", price="10.00", currency="USD",
+        category="Murder Mystery 2", url="https://usd.example/products/batwing",
+    )
+    await make_product(
+        db_session, beta, "Batwing", price="2.00", currency="EUR",
+        category="Murder Mystery 2", url="https://eur.example/products/batwing",
+    )
+    await db_session.commit()
+
+    item = (await api_client.get(
+        "/api/search/suggestions", params={"q": "Batwing"}
+    )).json()["items"][0]
+    assert item["best_price"] is None
+    assert item["currency"] == "MULTI"
+    assert item["prices_by_currency"] == [
+        {"currency": "EUR", "lowest_observed_price": 2.0},
+        {"currency": "USD", "lowest_observed_price": 10.0},
+    ]
+
+
 # ── Compare ───────────────────────────────────────────────────────────────────
 
 async def test_compare_lists_every_active_competitor_and_sorts_by_price(
@@ -241,6 +328,51 @@ async def test_compare_does_not_match_across_collections(db_session, api_client)
     )
 
 
+async def test_compare_does_not_promote_a_named_bundle_as_the_base_product(
+    db_session, api_client
+):
+    alpha = await make_competitor(db_session, "Alpha", "https://alpha.example")
+    beta = await make_competitor(db_session, "Beta", "https://beta.example")
+    await make_product(
+        db_session, alpha, "Batwing", price="10.00", category="Murder Mystery 2",
+        url="https://alpha.example/products/batwing",
+    )
+    await make_product(
+        db_session, beta, "Batwing Bundle", price="2.00", category="Murder Mystery 2",
+        url="https://beta.example/products/batwing-bundle",
+    )
+    await db_session.commit()
+
+    body = (await api_client.get("/api/search/compare", params={"q": "Batwing"})).json()
+    beta_row = next(row for row in body["items"] if row["competitor_name"] == "Beta")
+    assert beta_row["product"] is None, "a bundle is a different market offer"
+
+
+async def test_compare_fallback_preserves_fuzzy_match_outside_fast_path(
+    db_session, api_client
+):
+    alpha = await make_competitor(db_session, "Alpha", "https://alpha.example")
+    beta = await make_competitor(db_session, "Beta", "https://beta.example")
+    target = await make_product(
+        db_session, alpha, "abcdefgh", price="10.00",
+        url="https://alpha.example/products/abcdefgh",
+    )
+    await make_product(
+        db_session, beta, "xbcdefgh", price="12.00",
+        url="https://beta.example/products/xbcdefgh",
+    )
+    await db_session.commit()
+
+    body = (await api_client.get(
+        "/api/search/compare", params={"product_id": target.id}
+    )).json()
+
+    assert body["total_matches"] == 2
+    beta_row = next(row for row in body["items"] if row["competitor_name"] == "Beta")
+    assert beta_row["product"]["title"] == "xbcdefgh"
+    assert beta_row["match_score"] == 0.875
+
+
 async def test_compare_by_product_id_is_exact(db_session, api_client):
     alpha, beta, _ = await seed_market(db_session)
 
@@ -271,50 +403,254 @@ async def test_compare_no_match_returns_empty_envelope(db_session, api_client):
     assert body["total_matches"] == 0
 
 
-async def test_compare_with_no_arguments_returns_empty_envelope(db_session, api_client):
-    """BUG (documented): /search/compare has no required parameter, so calling it
-    with neither q nor product_id returns 200 and an empty envelope rather than
-    422. Characterising current behaviour."""
+async def test_compare_with_no_arguments_is_rejected(db_session, api_client):
+    """The typed compare contract requires one unambiguous target selector."""
     resp = await api_client.get("/api/search/compare")
-    assert resp.status_code == 200
-    assert resp.json()["target"] is None
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Provide q or product_id."
 
 
-async def test_compare_ignores_freshness(db_session, api_client):
-    """
-    BUG (documented): compare surfaces prices with no freshness filter or
-    signal. A price last checked weeks ago ranks identically to one checked
-    minutes ago, and the response carries no staleness indicator beyond the raw
-    last_checked_at on each product.
-
-    This is the core motivation for the freshness model in
-    docs/DAILY_CRITICAL_WORKFLOWS.md - the owner makes pricing decisions from
-    this screen.
-    """
+async def test_compare_separates_lowest_reliable_from_lower_stale_observation(
+    db_session, api_client
+):
     alpha = await make_competitor(db_session, "Alpha Store", "https://alpha.example")
     beta = await make_competitor(db_session, "Beta Store", "https://beta.example")
 
-    await make_product(db_session, alpha, "Batwing", price="4.00",
-                       url="https://alpha.example/products/batwing",
-                       last_checked_at=hours_ago(24 * 30))   # a month old
-    await make_product(db_session, beta, "Batwing", price="9.00",
-                       url="https://beta.example/products/batwing",
-                       last_checked_at=hours_ago(0.1))       # minutes old
+    stale_time = datetime.now(timezone.utc) - timedelta(days=3)
+    stale_run = await make_search_run(
+        db_session, alpha, observed_at=stale_time, terminal_at=stale_time + timedelta(minutes=1)
+    )
+    current_run = await make_search_run(db_session, beta)
+    stale_product = await make_product(
+        db_session, alpha, "Batwing", price="4.00",
+        url="https://alpha.example/products/batwing", last_checked_at=stale_time,
+    )
+    current_product = await make_product(
+        db_session, beta, "Batwing", price="9.00",
+        url="https://beta.example/products/batwing",
+    )
+    await observe_product(stale_product, stale_run)
+    await observe_product(current_product, current_run)
     await db_session.commit()
 
     body = (await api_client.get("/api/search/compare", params={"q": "Batwing"})).json()
-    rows = [r for r in body["items"] if r["product"]]
+    summary = body["market_summary"]
+    usd = summary["currencies"][0]
 
-    # The month-old price wins purely because it is numerically lower.
-    assert float(rows[0]["product"]["current_price"]) == 4.00
-    assert rows[0]["competitor_name"] == "Alpha Store"
+    assert usd["lowest_observed_price"] == 4.0
+    assert usd["lowest_observed_competitor_name"] == "Alpha Store"
+    assert usd["lowest_reliable_price"] == 9.0
+    assert usd["lowest_reliable_competitor_name"] == "Beta Store"
+    assert summary["trustworthy_current"] == 1
+    assert summary["degraded_or_unknown"] == 1
 
-    # Nothing in the payload flags it as stale.
-    assert "freshness" not in rows[0]
-    assert "is_stale" not in rows[0]["product"]
-    assert rows[0]["product"]["last_checked_at"] is not None, (
-        "the raw timestamp is present - a future freshness model can derive from it"
+    rows = {row["competitor_name"]: row for row in body["items"]}
+    assert rows["Alpha Store"]["trust"]["coverage_state"] == "stale"
+    assert rows["Alpha Store"]["trust"]["reliable"] is False
+    assert rows["Alpha Store"]["trust"]["product_observation_age_seconds"] > 172800
+    assert rows["Beta Store"]["trust"]["coverage_state"] == "current_complete"
+    assert rows["Beta Store"]["trust"]["reliable"] is True
+
+
+async def test_compare_market_range_uses_only_current_complete_in_stock_prices(
+    db_session, api_client
+):
+    prices = ("9.00", "12.00", "15.00")
+    for index, price in enumerate(prices):
+        competitor = await make_competitor(
+            db_session, f"Store {index}", f"https://store-{index}.example"
+        )
+        run = await make_search_run(db_session, competitor)
+        product = await make_product(
+            db_session, competitor, "Batwing", price=price,
+            url=f"https://store-{index}.example/products/batwing",
+        )
+        await observe_product(product, run)
+    out_of_stock = await make_competitor(db_session, "No Stock", "https://nostock.example")
+    out_run = await make_search_run(db_session, out_of_stock)
+    out_product = await make_product(
+        db_session, out_of_stock, "Batwing", price="2.00", stock_status="out_of_stock",
+        url="https://nostock.example/products/batwing",
     )
+    await observe_product(out_product, out_run)
+    await db_session.commit()
+
+    body = (await api_client.get("/api/search/compare", params={"q": "Batwing"})).json()
+    usd = body["market_summary"]["currencies"][0]
+    assert usd["lowest_observed_price"] == 2.0
+    assert usd["lowest_reliable_price"] == 9.0
+    assert usd["highest_reliable_price"] == 15.0
+    assert usd["median_reliable_price"] == 12.0
+    assert usd["reliable_price_count"] == 3
+    no_stock = next(row for row in body["items"] if row["competitor_name"] == "No Stock")
+    assert no_stock["trust"]["trustworthy_current_observation"] is True
+    assert no_stock["trust"]["reliable"] is False
+    assert "not confirmed in stock" in no_stock["trust"]["warning"]
+
+
+@pytest.mark.parametrize(
+    ("completeness", "expected_state"),
+    [("partial", "partial"), ("suspicious_empty", "suspicious_empty")],
+)
+async def test_compare_marks_latest_incomplete_catalog_without_hiding_price(
+    db_session, api_client, completeness, expected_state
+):
+    competitor = await make_competitor(db_session, "Degraded", "https://degraded.example")
+    complete = await make_search_run(db_session, competitor)
+    product = await make_product(
+        db_session, competitor, "Batwing", price="5.00",
+        url="https://degraded.example/products/batwing",
+    )
+    await observe_product(product, complete)
+    later = complete.terminal_at + timedelta(minutes=5)
+    incomplete = await make_search_run(
+        db_session,
+        competitor,
+        completeness=completeness,
+        observed_at=later,
+        terminal_at=later + timedelta(minutes=1),
+    )
+    if completeness == "partial":
+        await observe_product(product, incomplete)
+    await db_session.commit()
+
+    body = (await api_client.get("/api/search/compare", params={"q": "Batwing"})).json()
+    row = body["items"][0]
+    assert row["product"]["current_price"] == 5.0
+    assert row["trust"]["coverage_state"] == expected_state
+    assert row["trust"]["reliable"] is False
+    assert body["market_summary"]["no_reliable_prices"] is True
+    assert body["market_summary"]["currencies"][0]["lowest_observed_price"] == 5.0
+
+
+async def test_compare_marks_failed_attempt_and_preserves_prior_observation(
+    db_session, api_client
+):
+    competitor = await make_competitor(db_session, "Failed Store", "https://failed.example")
+    complete = await make_search_run(db_session, competitor)
+    product = await make_product(
+        db_session, competitor, "Batwing", price="8.00",
+        url="https://failed.example/products/batwing",
+    )
+    await observe_product(product, complete)
+    failed_at = complete.terminal_at + timedelta(minutes=10)
+    await make_search_run(
+        db_session,
+        competitor,
+        status="failed",
+        completeness="failed",
+        observed_at=failed_at,
+        terminal_at=failed_at,
+    )
+    await db_session.commit()
+
+    row = (await api_client.get(
+        "/api/search/compare", params={"q": "Batwing"}
+    )).json()["items"][0]
+    assert row["product"]["current_price"] == 8.0
+    assert row["trust"]["coverage_state"] == "failed"
+    assert row["trust"]["last_failed_at"] is not None
+    assert row["trust"]["producing_run"]["run_id"] == complete.id
+
+
+async def test_compare_legacy_lineage_is_unknown_and_never_promoted(db_session, api_client):
+    competitor = await make_competitor(db_session, "Legacy", "https://legacy.example")
+    await make_product(
+        db_session, competitor, "Batwing", price="3.00",
+        url="https://legacy.example/products/batwing",
+    )
+    await db_session.commit()
+
+    body = (await api_client.get("/api/search/compare", params={"q": "Batwing"})).json()
+    row = body["items"][0]
+    assert row["trust"]["coverage_state"] == "unknown"
+    assert row["trust"]["price_reliability"] == "unknown"
+    assert row["trust"]["producing_run"] is None
+    assert body["market_summary"]["currencies"][0]["lowest_reliable_price"] is None
+
+
+async def test_compare_exposes_active_sync_without_claiming_refresh_completed(
+    db_session, api_client
+):
+    competitor = await make_competitor(db_session, "Syncing", "https://syncing.example")
+    complete = await make_search_run(db_session, competitor)
+    product = await make_product(
+        db_session, competitor, "Batwing", price="6.00",
+        url="https://syncing.example/products/batwing",
+    )
+    await observe_product(product, complete)
+    active = await make_search_run(
+        db_session,
+        competitor,
+        status="running",
+        completeness="unknown",
+        observed_at=datetime.now(timezone.utc),
+    )
+    await db_session.commit()
+
+    body = (await api_client.get("/api/search/compare", params={"q": "Batwing"})).json()
+    row = body["items"][0]
+    assert row["trust"]["active_sync"]["run_id"] == active.id
+    assert row["trust"]["active_sync"]["status"] == "running"
+    assert row["trust"]["coverage_state"] == "current_complete"
+    assert body["market_summary"]["syncing_competitors"] == 1
+
+
+async def test_compare_never_combines_currencies(db_session, api_client):
+    for name, currency, price in (("USD Store", "USD", "10.00"), ("EUR Store", "EUR", "2.00")):
+        competitor = await make_competitor(
+            db_session, name, f"https://{currency.lower()}.example"
+        )
+        run = await make_search_run(db_session, competitor)
+        product = await make_product(
+            db_session, competitor, "Batwing", price=price, currency=currency,
+            url=f"https://{currency.lower()}.example/products/batwing",
+        )
+        await observe_product(product, run)
+    await db_session.commit()
+
+    body = (await api_client.get("/api/search/compare", params={"q": "Batwing"})).json()
+    summaries = {item["currency"]: item for item in body["market_summary"]["currencies"]}
+    assert summaries["USD"]["lowest_reliable_price"] == 10.0
+    assert summaries["EUR"]["lowest_reliable_price"] == 2.0
+    assert len(summaries) == 2
+
+
+async def test_compare_price_change_comes_from_direct_snapshots(db_session, api_client):
+    competitor = await make_competitor(db_session, "History", "https://history.example")
+    run = await make_search_run(db_session, competitor)
+    product = await make_product(
+        db_session, competitor, "Batwing", price="8.00",
+        url="https://history.example/products/batwing",
+    )
+    await observe_product(product, run)
+    previous_at = run.observation_completed_at - timedelta(hours=1)
+    db_session.add_all([
+        ProductSnapshot(
+            product_id=product.id, title=product.title, price="10.00", currency="USD",
+            stock_status="in_stock", checked_at=previous_at, observed_at=previous_at,
+        ),
+        ProductSnapshot(
+            product_id=product.id, title=product.title, price="8.00", currency="USD",
+            stock_status="in_stock", checked_at=run.terminal_at,
+            observed_at=run.observation_completed_at, scrape_run_id=run.id,
+        ),
+    ])
+    await db_session.commit()
+
+    row = (await api_client.get(
+        "/api/search/compare", params={"q": "Batwing"}
+    )).json()["items"][0]
+    assert row["price_change"] == {
+        "previous_price": 10.0,
+        "current_price": 8.0,
+        "currency": "USD",
+        "direction": "decrease",
+        "amount": 2.0,
+        "percentage": 20.0,
+        "changed_at": run.observation_completed_at.isoformat().replace("+00:00", "Z"),
+        "scrape_run_id": run.id,
+    }
 
 
 # ── Batch compare ─────────────────────────────────────────────────────────────

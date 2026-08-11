@@ -3,15 +3,16 @@
 **Read this first.** This is the handoff file between working sessions. If it is stale,
 fix it as part of the task.
 
-_Last updated: 2026-08-11, Phase 1B.2 release gate verified locally._
+_Last updated: 2026-08-12, Phase 1C Search verified locally._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Phase 1B.2 release gate complete locally** — ready for Phase 1C Search development; production merge, migration, and one-competitor proof remain manual. |
+| **Current phase** | **Phase 1C Search complete locally** — ready for Phase 1D Export development; production merge, migration, and one-competitor Sync proof remain manual. |
+| **Phase 1C base** | `c7c6f32ec6eaa6085be70ec80e6f0627ee33614c` |
 | **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
-| **Working branch** | `v2/durable-sync-lifecycle` |
+| **Working branch** | `v2/search-trust-ui` |
 | **Migration head** | `0005_durable_sync_lifecycle` |
 | **Archive baseline** | `archive/pre-v2-rearchitecture` → `f346f70`; do not move or delete. |
 | **Production** | Not inspected, migrated, dispatched, or deployed by this phase. |
@@ -19,7 +20,38 @@ _Last updated: 2026-08-11, Phase 1B.2 release gate verified locally._
 Priority remains: P0 migration safety, P1 Sync, P2 Search, P3 Export, P4 daily-workflow
 UX, then lower-priority features. Treasury Audit remains design-only.
 
-## 2. Phase 1B.2 outcome
+## 2. Phase 1C outcome
+
+`/search` is now a trustworthy daily pricing surface rather than a numerically sorted
+view of undifferentiated stored rows.
+
+- The existing normalization, fuzzy scoring, collection/mutation identity, grouping, and
+  representative thresholds remain regression-protected.
+- Compare uses a guarded SQL fast path for definitive aliases, then the complete prior
+  matcher for unresolved competitors. On a local 12-competitor/15,000-product exact-alias
+  dataset, median compare latency fell from **967.83 ms to 91.40 ms**; PostgreSQL was not
+  the bottleneck, so no extension/index/migration was added.
+- Typed Search contracts expose product observation, producing run, latest complete,
+  latest partial, last failure, current completeness, active Sync, and separate absolute
+  product/coverage ages.
+- Coverage states are `current_complete`, `partial`, `suspicious_empty`, `failed`,
+  `stale`, and `unknown`. The expected cycle follows the 08:47 Cairo recovery boundary.
+- A reliable market price must be current-complete, directly linked to the latest complete
+  run, priced in an explicit currency, and confirmed in stock. Degraded observations stay
+  visible as `lowest_observed_price` and never silently become the reliable reference.
+- Lowest/highest/median reliable prices are calculated per currency. Missing or
+  cross-currency values are never combined.
+- Direct snapshots provide the latest real price-change context; events are not treated as
+  price-history authority.
+- The Search UI now has 250 ms autocomplete debounce, keyboard navigation, loading/error/
+  empty/degraded states, responsive competitor cards, progressive evidence disclosure,
+  and a durable Sync All action that never equates HTTP 202 with refreshed data.
+- Vitest + Testing Library adds eight frontend behavior tests for the daily Search path.
+
+Full flow, semantics, profile, query plans, UI ownership, and limitations:
+`docs/SEARCH_ARCHITECTURE.md`.
+
+## 3. Phase 1B.2 outcome
 
 Sync now has one provider-neutral business lifecycle:
 
@@ -95,7 +127,7 @@ There is one V2 reconciliation implementation (`application.sync` calling the ex
 detection service). The legacy implementation remains behind the explicit rollback flag
 until production proof is complete.
 
-## 3. Execution providers
+## 4. Execution providers
 
 ADR 0008 is Accepted with this staged decision:
 
@@ -118,7 +150,7 @@ The optional API dispatcher is disabled by default. When enabled, its fine-grain
 token is server-only and should be limited to this repository with Actions write access.
 A failed dispatch leaves the request durably queued; the next scheduled drain can claim it.
 
-## 4. API and UI
+## 5. API and UI
 
 New explicit contracts:
 
@@ -132,11 +164,12 @@ The Competitors page shows accepted, queued, running, retrying, success, partial
 failed states; per-competitor run details; attempts; safe failures; completeness; observed
 product counts; durations; and last complete coverage. It does not equate 202 with success.
 
-Phase 1C can consume `last_complete_at`, `latest_partial_at`, `last_failed_at`,
-`coverage_complete`, active-run status, and per-product `last_observed_at`. Search itself
-has not yet been redesigned or made freshness-aware.
+Search now consumes run completeness/lineage and per-product `last_observed_at` directly,
+returns typed trust and currency-market summaries, and renders them on the redesigned
+daily-use page. Suggestions and compare have explicit response models. Batch Search and
+the unused `/search/products` route retain their legacy contracts.
 
-## 5. Production blockers and staged migration
+## 6. Production blockers and staged migration
 
 Production may be unstamped or may not yet contain Phase 1B.1 constraints. Do not deploy
 the worker or set strict schema mode until the owner performs `docs/RUNBOOK.md` §2.2–2.4:
@@ -157,15 +190,16 @@ that no real worker owns them before resolving them. Its downgrade is implemente
 queued V2 row has no execution start; downgrade truthfully backfills legacy `started_at`
 from `queued_at` before restoring the prior non-null column.
 
-## 6. Verification status
+## 7. Verification status
 
 All tests use deterministic fixtures/mocks; no live storefront or production database was
 used.
 
 | Gate | Result |
 |---|---|
-| Full backend | **197 passed**, 11 pre-existing warnings |
-| Critical path | **130 passed**, 67 deselected |
+| Full backend | **213 passed**, 11 pre-existing warnings |
+| Critical path | **142 passed**, 71 deselected |
+| Phase 1C Search | **39 passed**: 35 PostgreSQL critical + 4 pure cycle-policy |
 | Phase 1A daily/schema regression | **93 passed** |
 | Phase 1B.1 Sync/integrity | **37 passed** |
 | Phase 1B.2 lifecycle | **32 passed**, including 5 claim-race iterations |
@@ -173,15 +207,17 @@ used.
 | Completeness safety selection | **5 passed** |
 | Fresh / prior-`0004` upgrade | both reached `0005` head |
 | Alembic drift | `No new upgrade operations detected` |
-| Frontend typecheck/build | pass; 943 modules, 687.84 kB main chunk |
+| Frontend tests | **8 passed** with Vitest + Testing Library |
+| Frontend typecheck/build | pass; 2,413 modules, 704.45 kB main chunk |
 | Startup/workflow | 36 routes with five Sync V2 routes; 2 YAML/security tests pass |
 | Diff/secret safety | `git diff --check` and staged Gitleaks scan pass |
 
 Known pre-existing warnings remain: Pydantic class-based config, FastAPI `on_event`, the
-custom pytest-asyncio loop fixture, and Starlette's multipart import. Frontend lint is not
-an available gate because ESLint is not installed; there are still no frontend unit tests.
+custom pytest-asyncio loop fixture, Starlette's multipart import, React Router v7 future
+flags, Vite's CJS Node API, and the existing chunk-size warning. Frontend lint is not an
+available gate because ESLint is not installed.
 
-## 7. Remaining risks
+## 8. Remaining risks
 
 - GitHub schedules are best-effort and can be delayed or disabled after repository
   inactivity. Manual runner startup also has queue/setup latency.
@@ -194,14 +230,22 @@ an available gate because ESLint is not installed; there are still no frontend u
 - The old scraper remains a multi-platform service; Phase 1B.2 added a contract/telemetry
   boundary without performing the later adapter refactor.
 - Production database classification/migration and real provider proof are still manual.
+- Search suggestions still use an explicit 1,000-candidate cap; broad queries ask the user
+  to add a word rather than claiming complete suggestion coverage.
+- The market taxonomy remains hardcoded and duplicated with Export/scraper vocabulary.
+- Search trust follows the accepted Cairo morning topology; a future promised cadence
+  requires a policy/test update.
+- Snapshot history records changes, not every observation, so Search shows recent change
+  context rather than a dense price series.
 
-## 8. Next recommended task
+## 9. Next recommended task
 
-Begin **Phase 1C: make `/search` trustworthy, freshness-aware, fast, and polished for
-daily use.** Production rollout remains independently gated by the merge/migration/smoke
-checklist in `docs/RUNBOOK.md`; do not start Search as part of this release-gate commit.
+Begin **Phase 1D: make `/exports` truthful about live versus cached/partial data, reliable
+for daily use, and visually polished.** Preserve Search and Sync contracts. Production
+rollout remains independently gated by the merge/migration/smoke checklist in
+`docs/RUNBOOK.md`; do not start Export work in the Phase 1C checkpoint.
 
-## 9. Decisions not to reverse
+## 10. Decisions not to reverse
 
 1. Alembic is the only schema authority; startup verifies and never mutates schema.
 2. PostgreSQL is the durable Sync coordination/source-of-truth layer; Redis is not.
@@ -213,8 +257,10 @@ checklist in `docs/RUNBOOK.md`; do not start Search as part of this release-gate
 8. No live network calls in tests or CI and no secrets in logs, fixtures, or docs.
 9. `archive/pre-v2-rearchitecture` must not be changed.
 10. Preserve Git author identity and do not add AI attribution trailers.
+11. Search never hides degraded observations or promotes them to the reliable market
+    reference; currencies remain separate.
 
-## 10. Local commands
+## 11. Local commands
 
 ```bash
 cd backend
@@ -226,4 +272,5 @@ TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:5432/market_monit
 cd frontend
 npx tsc --noEmit
 npm run build
+npm run test:run
 ```
