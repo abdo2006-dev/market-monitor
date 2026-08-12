@@ -24,6 +24,11 @@ async def scan_due(
 ):
     _check_auth(authorization)
     if settings.SYNC_EXECUTION_MODE == "v2":
+        if not settings.SYNC_MORNING_ENABLED:
+            return {
+                "execution": "durable_v2",
+                "status": "automatic_sync_disabled",
+            }
         from app.application.sync import get_request_status, request_all_competitor_scans
         from app.infrastructure.github_actions import dispatch_sync_request
 

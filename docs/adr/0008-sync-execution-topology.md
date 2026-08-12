@@ -62,6 +62,8 @@ The initial provider is `.github/workflows/sync-v2.yml`:
   daylight-saving changes are handled by GitHub rather than fixed UTC offsets;
 - both schedules derive the same Cairo local-date idempotency key, so the second means
   “ensure/recover today” rather than “scan again”;
+- scheduled execution is rollout-gated by the repository Actions variable
+  `SYNC_MORNING_ENABLED`, which defaults false through manual production proof;
 - each runner recovers expired leases and drains eligible PostgreSQL work;
 - the API may optionally dispatch after it commits the request. Dispatch failure leaves
   the durable request queued and visibly records only a safe category.
@@ -123,3 +125,6 @@ manual pickup and continuous retry/recovery; the trade-off is ongoing hosting co
   compatibility. The V2 beat scan scheduler is disabled to prevent dual execution.
 - Production adoption requires the staged schema classification/migration and explicit
   proof in `docs/RUNBOOK.md`; this ADR does not authorize automatic deployment or writes.
+- GitHub is the one production automatic owner after proof. Vercel keeps its separate
+  `SYNC_MORNING_ENABLED` value false so the compatibility cron cannot start a second
+  morning invocation.

@@ -24,6 +24,11 @@ dispatch API. Scheduled GitHub jobs create/reuse the deterministic Cairo morning
 and drain eligible work. A dispatch outage therefore changes only dispatch metadata; it
 cannot lose or falsely complete the job.
 
+Automatic request creation is a separate, default-off release gate. The Vercel
+compatibility cron, provider-neutral worker `--morning` mode, and GitHub schedule all
+require `SYNC_MORNING_ENABLED=true` in their own deployment environment. Manual V2
+request creation and request-ID processing do not require it.
+
 Live Export remains synchronous on the Vercel request path. Discord notification delivery
 remains legacy and does not determine Sync success.
 
@@ -61,16 +66,25 @@ GitHub environment controls are separate and should be configured deliberately:
 
 - **Environment secret:** store `PRODUCTION_DATABASE_URL` in `production-sync`, not as a
   frontend variable and preferably not as a repository-wide secret. GitHub exposes it only
-  to the `sync` job after the environment gate passes.
+  to the Sync and manual migration jobs after the environment gate passes.
 - **Deployment branch restriction:** allow only the protected/default `main` branch. This
   complements the workflow event guard and trusted checkout.
 - **Approval/protection rules:** do not configure required reviewers for routine automatic
   morning Sync in this personal-use deployment. A required reviewer pauses every scheduled
   job before the secret is released. Add one only if the owner explicitly prefers manual
   approval over unattended morning freshness.
+- **Repository Actions variable:** leave `SYNC_MORNING_ENABLED` absent/false through the
+  one-competitor and manual Sync-All proof. Change it to `true` only as the explicit
+  Stage D action. It is not a secret; repository scope makes it available to the job-level
+  schedule guard before the protected environment starts.
 
 The environment does not grant repository permissions. The workflow still declares only
 `contents: read`; environment protection controls eligibility and secret release.
+
+The manual database workflow uses the same environment, accepts only its fixed
+inspect/upgrade/stamp-head choices, refuses non-`main` refs, and checks out pinned trusted
+`main` code. Its default remains the read-only classifier; write actions still require the
+literal `MIGRATE` confirmation.
 
 ### Public-repository threat model
 
@@ -146,6 +160,7 @@ profiles, or webhook URLs.
 | `SYNC_EXECUTION_MODE` | `v2` | explicit durable/legacy boundary |
 | `SYNC_MAX_ATTEMPTS` | `3` | durable run attempt budget |
 | `SYNC_LEASE_SECONDS` | `600` | claim lease; heartbeat renews at most every 60s |
+| `SYNC_MORNING_ENABLED` | `false` | default-off automatic morning request/drain gate |
 | `SYNC_DISPATCH_PROVIDER` | `none` | set `github_actions` only on the server |
 | `GITHUB_ACTIONS_DISPATCH_TOKEN` | unset | fine-grained server-only Actions token |
 | `GITHUB_ACTIONS_REPOSITORY` | unset | `owner/repository` dispatch target |
@@ -170,10 +185,13 @@ Follow `docs/RUNBOOK.md` §2.2–2.4. Summary:
 5. migrate through `0004`, then `0005` using the manual database workflow;
 6. verify head, schema constraints/indexes, and application startup;
 7. merge the reviewed branch so `sync-v2.yml` exists on default `main`;
-8. deploy API/UI with `SYNC_EXECUTION_MODE=v2` but dispatcher disabled;
+8. deploy API/UI with `SYNC_EXECUTION_MODE=v2`, dispatcher disabled, and
+   `SYNC_MORNING_ENABLED=false`;
 9. configure the protected GitHub environment and run one explicit request;
 10. enable the optional dispatcher if desired;
-11. set `DB_SCHEMA_CHECK=strict` only after proof.
+11. set `DB_SCHEMA_CHECK=strict` only after proof;
+12. enable the GitHub repository Actions morning variable only after manual Sync-All proof,
+    while leaving Vercel's variable false.
 
 Rollback application behavior with `SYNC_EXECUTION_MODE=legacy`. A schema downgrade exists
 for controlled recovery, but do not downgrade production merely to toggle execution mode.
@@ -188,6 +206,6 @@ Never allow an old lease owner to keep running during rollback.
    GitHub is not a continuously polling service.
 5. Playwright was not required by the benchmark, but a future browser competitor increases
    runner install/runtime variance.
-6. Vercel's compatibility cron and GitHub schedules may both invoke morning creation; daily
-   database idempotency prevents duplicate work, but operating both is unnecessary.
+6. Keep Vercel `SYNC_MORNING_ENABLED=false`; GitHub is the selected automatic morning
+   owner. Database idempotency remains a backstop, not permission to run both schedulers.
 7. CORS/cron-auth/health-depth risks outside Sync remain documented in `docs/SECURITY.md`.

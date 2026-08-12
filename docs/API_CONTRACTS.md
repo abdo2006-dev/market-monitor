@@ -75,6 +75,11 @@ The legacy `/api/competitors/.../scan-now` and `/scan-all` paths delegate to the
 cases under `SYNC_EXECUTION_MODE=v2`; their historical shapes below exist only when the
 explicit rollback flag is `legacy`.
 
+The compatibility `/api/cron/scan-due` and `/daily` paths create automatic V2 work only
+when `SYNC_MORNING_ENABLED=true`. While the default-off rollout gate is false,
+`scan-due` returns `{"execution":"durable_v2","status":"automatic_sync_disabled"}` and
+does not create a request or run.
+
 Existing product responses now add nullable `last_observed_at` and
 `last_observed_run_id`. Snapshot/event responses add nullable observation/run lineage.
 Legacy rows remain null; V2 reconciliation supplies real values. These additive fields are

@@ -239,9 +239,11 @@ successful scrape; and the unhandled scraper exception.
 
 ### How it works today
 
-With `SYNC_EXECUTION_MODE=v2` (the default), every manual, bulk, and scheduled request
-creates durable `SyncRequest`/`ScrapeRun` rows through `app.application.sync`. The browser
-does not fan out. A provider-neutral worker claims PostgreSQL work, performs acquisition
+With `SYNC_EXECUTION_MODE=v2` (the default), every permitted manual, bulk, and scheduled
+request creates durable `SyncRequest`/`ScrapeRun` rows through `app.application.sync`.
+Automatic morning producers additionally require the default-off
+`SYNC_MORNING_ENABLED` rollout gate. The browser does not fan out. A provider-neutral
+worker claims PostgreSQL work, performs acquisition
 outside a long transaction, and reconciles with the Phase 1B.1 advisory lock.
 
 ```text
@@ -364,6 +366,10 @@ The accepted morning topology supplies the cadence: yesterday remains the requir
 catalog cycle until the 08:47 Cairo recovery schedule, then today's complete observation
 is required. This replaces the rejected arbitrary minute threshold. Search still shows
 the exact product and complete-catalog ages so the user can evaluate the verdict.
+
+The cadence becomes an operational promise only after Phase 1E explicitly enables the
+GitHub repository Actions variable. Vercel keeps its same-named application
+flag false so the compatibility cron is not a second automatic Sync owner.
 
 Only a current-complete product directly linked to the latest complete run, with a price,
 currency, and confirmed in-stock state, participates in `lowest_reliable_price`. Every

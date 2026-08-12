@@ -179,7 +179,9 @@ Actions → "Database migration (manual)" → Run workflow. It defaults to `insp
 `MIGRATE` in the confirmation field. `stamp-head` refuses to run unless the inspector
 reports Case B. It never runs on push, on a schedule, or on deploy.
 
-Requires the `PRODUCTION_DATABASE_URL` repository secret.
+Requires the `PRODUCTION_DATABASE_URL` secret in the protected `production-sync`
+environment. The workflow is manual-only, refuses non-`main` refs, checks out trusted
+`main`, and has read-only repository permissions.
 
 ### 2.3 Product duplicate audit and Phase 1B.1 migration
 
@@ -255,8 +257,8 @@ each row explicitly; do not bulk-update live work. Then:
 3. require `alembic current` to show `0005_durable_sync_lifecycle (head)`;
 4. inspect `sync_requests`, `sync_request_runs`, the claimable/non-terminal indexes,
    lifecycle check constraints, and nullable snapshot/event lineage FKs;
-5. deploy API/UI with `SYNC_EXECUTION_MODE=v2`, `SYNC_DISPATCH_PROVIDER=none`, and
-   `DB_SCHEMA_CHECK=warn`;
+5. deploy API/UI with `SYNC_EXECUTION_MODE=v2`, `SYNC_DISPATCH_PROVIDER=none`,
+   `SYNC_MORNING_ENABLED=false`, and `DB_SCHEMA_CHECK=warn`;
 6. configure the GitHub `production-sync` environment and run one manual request UUID;
 7. verify request→claim→terminal status, counts, completeness, lineage, and UI polling;
 8. enable optional dispatch and `DB_SCHEMA_CHECK=strict` only after proof.
@@ -293,6 +295,8 @@ Do not treat local completion as production readiness. Check every box in order.
 **GitHub**
 
 - Create `production-sync`; put `PRODUCTION_DATABASE_URL` in that environment only.
+- Leave the repository Actions variable `SYNC_MORNING_ENABLED` absent/false through the
+  single-competitor and manual Sync-All proof.
 - Restrict environment deployment branches to protected/default `main`. Do not require a
   reviewer for unattended morning jobs unless approval-gated Sync is explicitly desired.
 - Keep workflow permissions at `contents: read`. If server dispatch is later enabled, use
@@ -303,11 +307,14 @@ Do not treat local completion as production readiness. Check every box in order.
 **Vercel/application**
 
 - Deploy code containing the V2 API only after the database is compatible. Start with
-  `SYNC_EXECUTION_MODE=v2`, `SYNC_DISPATCH_PROVIDER=none`, and `DB_SCHEMA_CHECK=warn`.
+  `SYNC_EXECUTION_MODE=v2`, `SYNC_DISPATCH_PROVIDER=none`,
+  `SYNC_MORNING_ENABLED=false`, and `DB_SCHEMA_CHECK=warn`.
 - Confirm `/health`, application startup schema compatibility, and the five `/api/sync`
   routes. Do not enable automatic API-to-GitHub dispatch yet.
 - Run §2.6. Only after proof may the optional dispatcher and `DB_SCHEMA_CHECK=strict` be
   enabled.
+- Keep Vercel morning automation false so its compatibility cron is not a second Sync
+  owner. Enable only the GitHub repository Actions variable after manual Sync-All proof.
 
 ### 2.6 One-competitor production smoke
 
@@ -373,9 +380,9 @@ acquisition_completed_at <= reconciled_at <= terminal_at
 
 If the smoke fails, preserve evidence and prevent dual execution:
 
-1. Keep `SYNC_DISPATCH_PROVIDER=none` (or restore it) and pause/disable the GitHub Sync
-   workflow schedule. Stop any active V2 runner and inspect running leases before starting
-   legacy work.
+1. Keep `SYNC_DISPATCH_PROVIDER=none` (or restore it), set the GitHub repository Actions
+   variable `SYNC_MORNING_ENABLED=false`, and keep the Vercel value false. Stop any active
+   V2 runner and inspect running leases before starting legacy work.
 2. Set `SYNC_EXECUTION_MODE=legacy` in the application deployment and redeploy. Do not
    execute a legacy scan for the same intended request while a V2 claim is still running.
 3. Leave migration `0005` and all `SyncRequest`/`ScrapeRun` records in place for diagnosis.

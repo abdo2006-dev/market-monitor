@@ -1,20 +1,19 @@
 # Testing
 
-> **Phase 1D update.** Sections 1–3 below describe historical gaps at the Phase 0
+> **Phase 1E update.** Sections 1–3 below describe historical gaps at the Phase 0
 > baseline. Phase 1A/1B.1 added daily-path and product-integrity coverage, Phase 1B.2 added
 > a real PostgreSQL lifecycle suite, Phase 1C adds Search trust, and Phase 1D adds Export
-> provenance plus frontend behavior
-> tests, so
-> several "not covered" claims are now out of date. Current state: **§0** and
+> provenance plus frontend behavior. Phase 1E adds production-rollout safety-gate tests,
+> so several "not covered" claims are now out of date. Current state: **§0** and
 > `docs/DAILY_CRITICAL_WORKFLOWS.md` §9. The target pyramid in §4 is unchanged and still
 > the plan.
 
 ---
 
-## 0. Current state (Phase 1D Export)
+## 0. Current state (Phase 1E pre-rollout gate)
 
-The Phase 1D gate is **209 passed** against migrated PostgreSQL: 71 non-critical cases and
-138 critical cases. The focused lifecycle suite contains 32 cases. The frontend has 16
+The Phase 1E gate is **215 passed** against migrated PostgreSQL: 73 non-critical cases and
+142 critical cases. The focused lifecycle suite contains 34 cases. The frontend has 16
 daily-workflow behavior tests (8 Search and 8 Export).
 
 ```bash
@@ -33,11 +32,11 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:543
 |---|---|---|
 | `tests/test_core.py` | 65 | pure helpers (unchanged from Phase 0) |
 | `tests/test_search_trust.py` | 4 | Cairo-cycle boundary, current/stale coverage, out-of-stock price eligibility |
-| `tests/test_sync_workflow_release_gate.py` | 2 | Cairo-local schedules, safe triggers, default-branch checkout, environment, minimum permissions |
-| `tests/critical/test_schema_authority.py` | 10 | Alembic is the sole schema authority |
+| `tests/test_sync_workflow_release_gate.py` | 4 | Cairo-local schedules, default-off automation, safe triggers, environment-scoped secrets, pinned trusted actions, minimum permissions |
+| `tests/critical/test_schema_authority.py` | 12 | Alembic authority, real B- fingerprint, credential-safe classifier failure |
 | `tests/critical/test_sync_regression.py` | 32 | reconciliation, idempotency, failure, concurrency, stale ordering |
 | `tests/critical/test_product_integrity.py` | 5 | identity semantics, database constraints, duplicate audit/consolidation |
-| `tests/critical/test_sync_lifecycle.py` | 32 | requests, idempotency, claims, leases, retries, page/batch observation ordering, completeness, freshness, lineage, API/worker truthfulness |
+| `tests/critical/test_sync_lifecycle.py` | 34 | requests, idempotency, claims, leases, retries, observation ordering, completeness, freshness, lineage, API/worker truthfulness, disabled morning entry points |
 | `tests/critical/test_search_regression.py` | 35 | matching and guarded fallback, grouping, typed contract, trust states, currencies, reliable/observed summaries, snapshots, active Sync |
 | `tests/critical/test_export_regression.py` | 24 | live/cached mode truth, completeness, safe failures, provenance, compatibility, URL safety, lineage |
 

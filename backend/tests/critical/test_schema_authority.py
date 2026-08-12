@@ -8,6 +8,9 @@ migrations again.
 from __future__ import annotations
 
 import inspect
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -117,6 +120,54 @@ def test_schema_check_modes_are_known():
     from app.config import settings
 
     assert settings.DB_SCHEMA_CHECK in {"strict", "warn", "off"}
+
+
+def test_classifier_error_path_never_prints_database_url():
+    """Connection errors must not turn the classifier into a credential oracle."""
+    from scripts import check_schema_state
+
+    source = inspect.getsource(check_schema_state._main)
+    assert "DATABASE_URL" in source
+    assert "os.environ" not in source
+    assert "configured value is intentionally not displayed" in source
+
+
+@requires_db
+async def test_classifier_recognizes_unstamped_phase_1a_schema_as_case_b_minus(
+    migrated_database,
+):
+    """The documented 0003 stamp path must remain executable after later migrations."""
+    from sqlalchemy import text
+
+    from app.database import engine
+    from scripts.check_schema_state import inspect_database
+
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    env = {**os.environ, "DATABASE_URL": migrated_database}
+
+    def alembic(*args: str) -> None:
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            cwd=backend_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    alembic("downgrade", "0003_reconcile_index_names")
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP TABLE alembic_version"))
+
+        report = await inspect_database()
+
+        assert report["case"] == "B-", report
+        assert report["stamped_revision"] is None
+        assert report["missing_tables"] == ["sync_request_runs", "sync_requests"]
+    finally:
+        alembic("stamp", "0003_reconcile_index_names")
+        alembic("upgrade", "head")
 
 
 # ── Database-backed invariants ────────────────────────────────────────────────

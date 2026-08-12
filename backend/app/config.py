@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     SYNC_EXECUTION_MODE: Literal["v2", "legacy"] = "v2"
     SYNC_MAX_ATTEMPTS: int = 3
     SYNC_LEASE_SECONDS: int = 600
+    # Default-off rollout gate for every automatic morning request producer.
+    # Manual V2 requests and explicit request-id workers remain available.
+    SYNC_MORNING_ENABLED: bool = False
     SYNC_DISPATCH_PROVIDER: Literal["none", "github_actions"] = "none"
     GITHUB_ACTIONS_DISPATCH_TOKEN: Optional[str] = None
     GITHUB_ACTIONS_REPOSITORY: Optional[str] = None

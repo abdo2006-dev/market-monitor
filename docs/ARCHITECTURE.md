@@ -667,6 +667,11 @@ There is no V2 behavioural difference between UI, scan-all, scheduler, or cron. 
 diagnostic data, not a business-code selector. Notification delivery remains legacy and
 does not participate in Sync success; the outbox is still future work.
 
+Automatic morning entry points have one deployment-safety exception, not a domain-policy
+fork: they require the default-off `SYNC_MORNING_ENABLED` rollout gate before they may
+create or drain work. Manual request semantics remain identical. Production selects
+GitHub as the single automatic owner and leaves the Vercel compatibility cron gated off.
+
 ## B-5. Phase 1C Search slice (implemented)
 
 Interactive Search remains inside the modular monolith and PostgreSQL. The frontend owns

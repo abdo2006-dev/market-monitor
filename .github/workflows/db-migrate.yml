@@ -10,7 +10,7 @@ name: Database migration (manual)
 # both selecting "upgrade" AND typing the confirmation phrase, so a mis-click
 # cannot alter a production database.
 #
-# Requires repository secret: PRODUCTION_DATABASE_URL
+# Requires environment secret: production-sync / PRODUCTION_DATABASE_URL
 
 on:
   workflow_dispatch:
@@ -29,10 +29,15 @@ on:
         required: false
         default: ""
 
+permissions:
+  contents: read
+
 jobs:
   migrate:
     name: ${{ inputs.action }}
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    environment: production-sync
     defaults:
       run:
         working-directory: backend
@@ -40,9 +45,12 @@ jobs:
       DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: "3.12"
           cache: pip

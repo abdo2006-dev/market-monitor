@@ -21,6 +21,7 @@ from app.application.sync import (
     recover_expired_leases,
     request_all_competitor_scans,
 )
+from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models import ScrapeRun, SyncRequestRun
 
@@ -106,6 +107,10 @@ async def _execute(worker_id: str, run_id: int | None = None) -> tuple[bool, dic
 
 
 async def _main(args: argparse.Namespace) -> int:
+    if args.morning and not settings.SYNC_MORNING_ENABLED:
+        _emit("morning_sync_disabled")
+        return 3
+
     worker_id = args.worker_id or default_worker_id()
     recovery = await _recover()
     _emit("lease_recovery", **recovery)

@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -47,6 +46,51 @@ EXIT_UNSTAMPED = 20
 EXIT_UNSTAMPED_HISTORICAL = 21
 EXIT_DRIFT = 30
 EXIT_EMPTY = 40
+
+
+# Revision 0003 predates the product-identity and durable-Sync migrations. Keep
+# this structural fingerprint explicit: an unstamped production database must
+# match every known post-0003 addition before it is safe to call it Case B-.
+PHASE_1A_MISSING_TABLES = {
+    "sync_request_runs",
+    "sync_requests",
+}
+PHASE_1A_MISSING_COLUMNS = {
+    "events": ["scrape_run_id"],
+    "product_snapshots": ["observed_at", "scrape_run_id"],
+    "products": [
+        "canonical_url",
+        "identity_key",
+        "last_observed_at",
+        "last_observed_run_id",
+    ],
+    "scrape_runs": [
+        "acquisition_completed_at",
+        "acquisition_started_at",
+        "acquisition_strategy",
+        "attempt_count",
+        "claim_token",
+        "claimed_at",
+        "claimed_by",
+        "completeness",
+        "completeness_reason",
+        "failure_category",
+        "heartbeat_at",
+        "idempotency_key",
+        "lease_expires_at",
+        "max_attempts",
+        "next_attempt_at",
+        "observation_completed_at",
+        "observation_started_at",
+        "page_cap_reached",
+        "pages_fetched",
+        "queued_at",
+        "reconciled_at",
+        "request_count",
+        "terminal_at",
+        "trigger",
+    ],
+}
 
 
 def _expected_schema() -> dict[str, set[str]]:
@@ -111,10 +155,10 @@ async def inspect_database() -> dict:
 
     head = _alembic_head()
     structurally_matches = not missing_tables and not missing_columns
-    phase_1a_missing = missing_columns == {
-        "products": ["canonical_url", "identity_key"]
-    }
-    matches_phase_1a = not missing_tables and phase_1a_missing
+    matches_phase_1a = (
+        set(missing_tables) == PHASE_1A_MISSING_TABLES
+        and missing_columns == PHASE_1A_MISSING_COLUMNS
+    )
 
     if not app_tables:
         case, action = "D", "Empty database. Run: alembic upgrade head"
@@ -209,7 +253,7 @@ async def _main() -> int:
         print(f"ERROR: could not inspect database: {exc}", file=sys.stderr)
         print(
             "Set DATABASE_URL to the database you want to inspect. "
-            f"Currently: {os.environ.get('DATABASE_URL', '<unset, using default>')}",
+            "The configured value is intentionally not displayed.",
             file=sys.stderr,
         )
         return 1

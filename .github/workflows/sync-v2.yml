@@ -26,13 +26,16 @@ concurrency:
 
 jobs:
   sync:
-    if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'schedule' && vars.SYNC_MORNING_ENABLED == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production-sync
     env:
       DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
       SYNC_EXECUTION_MODE: v2
+      SYNC_MORNING_ENABLED: ${{ vars.SYNC_MORNING_ENABLED || 'false' }}
       PYTHONUNBUFFERED: "1"
     defaults:
       run:

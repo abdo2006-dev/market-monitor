@@ -3,20 +3,20 @@
 **Read this first.** This is the handoff file between working sessions. If it is stale,
 fix it as part of the task.
 
-_Last updated: 2026-08-12, Phase 1D Export verified locally._
+_Last updated: 2026-08-12, Phase 1E pre-rollout gate complete; production rollout blocked._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Phase 1D Export complete locally** — ready for review and the separately authorized release/proof gate; no production action was taken. |
+| **Current phase** | **Phase 1E pre-rollout gate complete locally** — rollout is blocked on credential rotation, production classification/audit, verified backup, GitHub environment/main integration, and separately authorized production steps. |
 | **Phase 1D base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` (Phase 1C checkpoint) |
 | **Phase 1C base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` |
 | **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
 | **Working branch** | `v2/export-provenance-ui` |
 | **Migration head** | `0005_durable_sync_lifecycle` |
 | **Archive baseline** | `archive/pre-v2-rearchitecture` → `f346f70`; do not move or delete. |
-| **Production** | Not inspected, migrated, dispatched, or deployed by this phase. |
+| **Production** | Configuration metadata and public read-only API metadata inspected. No database query completed, and nothing was migrated, dispatched, deployed, merged, or pushed. |
 
 Priority remains: P0 migration safety, P1 Sync, P2 Search, P3 Export, P4 daily-workflow
 UX, then lower-priority features. Treasury Audit remains design-only.
@@ -167,6 +167,8 @@ ADR 0008 is Accepted with this staged decision:
 `.github/workflows/sync-v2.yml` supports a safe request UUID for manual dispatch and two
 daily recovery schedules at 07:17 and 08:47 `Africa/Cairo`. Both scheduled invocations derive the same
 `automatic:<Africa/Cairo date>` request, so the second recovers rather than duplicates.
+The schedule job, worker morning mode, and Vercel compatibility cron are guarded by
+default-off `SYNC_MORNING_ENABLED`; GitHub alone is enabled after manual proof.
 The workflow has no PR trigger, checks out trusted `main`, uses the `production-sync`
 environment, pins third-party actions, and grants only `contents: read`.
 
@@ -226,20 +228,20 @@ used.
 
 | Gate | Result |
 |---|---|
-| Full backend | **209 passed**, 11 pre-existing warnings |
-| Critical path | **138 passed**, 71 deselected |
+| Full backend | **215 passed**, 11 pre-existing warnings |
+| Critical path | **142 passed**, 73 deselected |
 | Phase 1C Search | **39 passed**: 35 PostgreSQL critical + 4 pure cycle-policy |
 | Phase 1D Export + cycle policy | **28 passed**: 24 PostgreSQL critical + 4 pure policy |
 | Phase 1A daily/schema regression | **93 passed** |
 | Phase 1B.1 Sync/integrity | **37 passed** |
-| Phase 1B.2 lifecycle | **32 passed**, including 5 claim-race iterations |
+| Phase 1B.2 lifecycle | **34 passed**, including 5 claim-race iterations and two default-off morning gates |
 | Observation-order selection | **4 passed** |
 | Completeness safety selection | **5 passed** |
 | Fresh / prior-`0004` upgrade | both reached `0005` head |
 | Alembic drift | `No new upgrade operations detected` |
 | Frontend tests | **16 passed** with Vitest + Testing Library (8 Search + 8 Export) |
 | Frontend typecheck/build | pass; 2,414 modules, 710.51 kB main chunk |
-| Startup/workflow | startup import passes with 36 routes; 2 YAML/security tests pass |
+| Startup/workflow | strict startup passes with 36 routes; 4 YAML/security tests pass |
 
 Known pre-existing warnings remain: Pydantic class-based config, FastAPI `on_event`, the
 custom pytest-asyncio loop fixture, Starlette's multipart import, React Router v7 future
@@ -258,7 +260,8 @@ available gate because ESLint is not installed.
   intentionally independent of Discord delivery.
 - The old scraper remains a multi-platform service; Phase 1B.2 added a contract/telemetry
   boundary without performing the later adapter refactor.
-- Production database classification/migration and real provider proof are still manual.
+- Production database classification/migration and real provider proof remain blocked; see
+  `docs/PHASE_1E_RELEASE_GATE.md`.
 - Search suggestions still use an explicit 1,000-candidate cap; broad queries ask the user
   to add a word rather than claiming complete suggestion coverage.
 - The market taxonomy remains hardcoded and duplicated with Export/scraper vocabulary.
@@ -274,12 +277,12 @@ available gate because ESLint is not installed.
 
 ## 9. Next recommended task
 
-Begin the **Phase 1D release/proof gate** after review: merge the checkpoint, run the
-documented read-only production classification and startup checks, then perform one
-bounded non-Shopbloxs competitor Sync and one explicit live/cached Export proof. Do not
-expand Export persistence or add an ExportRun table before that evidence. The first
-subsequent engineering task should be the smallest safe extraction of the duplicated
-collection taxonomy into one authoritative owner.
+Follow `docs/PHASE_1E_RELEASE_GATE.md` in order. First rotate the exposed production
+database credential, establish the schema case with valid TLS trust, run the sanitized
+duplicate audit, and prove backup/restore. Only then review and integrate the cumulative
+branch, configure the default-off `production-sync` environment, and request separate
+authorization for each production write/proof stage. Do not begin Phase 1F or taxonomy
+cleanup while this gate is blocked.
 
 ## 10. Decisions not to reverse
 
@@ -295,6 +298,8 @@ collection taxonomy into one authoritative owner.
 10. Preserve Git author identity and do not add AI attribution trailers.
 11. Search never hides degraded observations or promotes them to the reliable market
     reference; currencies remain separate.
+12. `SYNC_MORNING_ENABLED` stays false through the single-competitor and manual Sync-All
+    proof; Vercel compatibility cron is never a second automatic Sync owner.
 
 ## 11. Local commands
 

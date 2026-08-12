@@ -44,9 +44,11 @@ React no longer selects competitors, controls concurrency, or fans out HTTP requ
 
 ## Flow 3 — Automatic Cairo morning Sync
 
-After `.github/workflows/sync-v2.yml` reaches the default branch, it runs at **07:17 and
-08:47 Africa/Cairo** every day. Each schedule entry uses the IANA timezone directly, so
-Cairo daylight-saving changes require no UTC-offset edit:
+After `.github/workflows/sync-v2.yml` reaches the default branch and the GitHub repository
+Actions variable `SYNC_MORNING_ENABLED` is explicitly set to `true`, it runs at
+**07:17 and 08:47 Africa/Cairo** every day. The variable is absent/false through manual
+production proof. Each schedule entry uses the IANA timezone directly, so Cairo
+daylight-saving changes require no UTC-offset edit:
 
 ```text
 GitHub schedule
@@ -62,7 +64,9 @@ or completes today's work and cannot blindly create another daily batch. It also
 manual request whose optional dispatch failed.
 
 The authenticated `/api/cron/scan-due` and `/daily` routes converge on the same automatic
-request in V2. The old Celery beat scan scheduler explicitly returns
+request in V2 only when the application deployment separately enables
+`SYNC_MORNING_ENABLED`. Production leaves that Vercel-side flag false so GitHub is the one
+automatic owner. The old Celery beat scan scheduler explicitly returns
 `legacy_scheduler_disabled`; it would otherwise enqueue a full batch every minute.
 
 ## Flow 4 — Claim and lease

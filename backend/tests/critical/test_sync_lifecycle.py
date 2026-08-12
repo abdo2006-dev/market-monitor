@@ -848,6 +848,53 @@ async def test_dispatch_failure_remains_queued_and_truthful(db_session, api_clie
     assert body["dispatch_error_category"] == "github_unreachable"
 
 
+async def test_compatibility_cron_cannot_create_automatic_v2_work_while_disabled(
+    db_session, monkeypatch
+):
+    from app.api.cron import scan_due
+    from app.config import settings
+
+    await make_competitor(db_session)
+    await db_session.commit()
+    monkeypatch.setattr(settings, "SYNC_EXECUTION_MODE", "v2")
+    monkeypatch.setattr(settings, "SYNC_MORNING_ENABLED", False)
+
+    result = await scan_due(authorization=None, db=db_session)
+
+    request_count = await db_session.scalar(select(func.count(SyncRequest.id)))
+    run_count = await db_session.scalar(select(func.count(ScrapeRun.id)))
+    assert result == {
+        "execution": "durable_v2",
+        "status": "automatic_sync_disabled",
+    }
+    assert request_count == 0
+    assert run_count == 0
+
+
+async def test_worker_morning_mode_is_blocked_while_automation_disabled(
+    db_session, monkeypatch
+):
+    from app.config import settings
+    from app.workers.sync_worker import _main
+
+    await make_competitor(db_session)
+    await db_session.commit()
+    monkeypatch.setattr(settings, "SYNC_MORNING_ENABLED", False)
+
+    code = await _main(
+        Namespace(
+            worker_id="test-worker", run_id=None, request_id=None,
+            once=False, drain=False, morning=True,
+        )
+    )
+
+    request_count = await db_session.scalar(select(func.count(SyncRequest.id)))
+    run_count = await db_session.scalar(select(func.count(ScrapeRun.id)))
+    assert code == 3
+    assert request_count == 0
+    assert run_count == 0
+
+
 async def test_worker_once_clean_exit_with_no_work(db_session):
     from app.workers.sync_worker import _main
 
