@@ -201,7 +201,8 @@ run lineage, observation time, and absence permission.
 - pure reconciliation/ChangeSet extraction;
 - versioned event payloads and a notification outbox;
 - one owner for market identity and collection taxonomy;
-- Export provenance (Phase 1D).
+- durable collection membership (cached Export currently reconstructs a collection from
+  product title/category aliases; Phase 1D provenance discloses that limitation).
 
 ## SearchTrustAssessment
 

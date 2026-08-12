@@ -692,7 +692,29 @@ fuzzy matches, a search service, or a schema change.
 See `docs/SEARCH_ARCHITECTURE.md` for the contract, cycle policy, statistics, profile,
 query-plan evidence, and remaining boundaries.
 
-## B-6. What V2 explicitly does not include
+## B-6. Phase 1D Export slice (implemented)
+
+Collection Export remains a synchronous HTTP download because its small, daily collection
+workflow has no demonstrated need for a queue, object store, cache, or new durable export
+record. The API owns acquisition/source choice and file truth; React only selects an
+explicit mode, renders typed provenance, and asks the browser to download already prepared
+bytes.
+
+```text
+Exports.tsx -> GET collection-prices (Axios blob)
+  -> live: shared acquire_catalog -> AcquisitionResult -> file headers
+  -> cached: active Product rows + ScrapeRun evidence -> file headers
+```
+
+`live` is the default and never consults stored rows. `cached` is a separate, explicit
+stored-data request. The default CSV/JSONL row schemas and JSON envelope remain unchanged;
+file-level `CollectionExportProvenance` uses response headers. The optional,
+versioned `include_provenance=true` extension adds JSON metadata or extra row fields.
+The shared Cairo market-cycle policy is owned by `domain.market_cycle`, and Export reuses
+the Search catalog-coverage classifier rather than implementing another freshness clock.
+See `docs/EXPORT_ARCHITECTURE.md` for the complete contract, security limits, and profile.
+
+## B-7. What V2 explicitly does not include
 
 No Kubernetes. No Kafka. No service mesh. No microservices. No event sourcing as a general
 pattern — the outbox is a targeted delivery mechanism, not a storage model. No enterprise

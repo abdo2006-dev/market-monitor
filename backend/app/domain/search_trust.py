@@ -8,13 +8,9 @@ daily Cairo Sync cycle and durable catalog completeness, never on request/commit
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import Literal
-from zoneinfo import ZoneInfo
-
-
-CAIRO = ZoneInfo("Africa/Cairo")
-MORNING_RECOVERY_CUTOFF = time(hour=8, minute=47)
+from app.domain.market_cycle import CAIRO, aware_utc, required_market_cycle_date
 
 CoverageState = Literal[
     "current_complete",
@@ -60,17 +56,20 @@ class TrustAssessment:
 
 
 def required_cairo_cycle_date(now: datetime) -> date:
-    """Return the catalog date expected at this point in the morning lifecycle.
+    """Compatibility name for the shared market-cycle policy."""
+    return required_market_cycle_date(now)
 
-    Yesterday's complete catalog remains the relevant cycle until the 08:47 Cairo
-    recovery invocation has had its scheduled opportunity.  Afterwards, today's
-    complete catalog is required.  ZoneInfo keeps the rule DST-safe.
+
+def assess_catalog_coverage(
+    evidence: CompetitorEvidence, *, now: datetime
+) -> CoverageState:
+    """Classify durable catalog coverage without making a product-price claim.
+
+    Export uses this same vocabulary for stored data.  It deliberately answers
+    only what the latest catalog attempt proves; price reliability remains a
+    Search-specific product-level decision.
     """
-
-    local_now = _aware_utc(now).astimezone(CAIRO)
-    if local_now.timetz().replace(tzinfo=None) < MORNING_RECOVERY_CUTOFF:
-        return local_now.date() - timedelta(days=1)
-    return local_now.date()
+    return _coverage_state(evidence, required_market_cycle_date(now))
 
 
 def assess_search_trust(
@@ -82,9 +81,9 @@ def assess_search_trust(
     stock_status: str | None,
     now: datetime,
 ) -> TrustAssessment:
-    now_utc = _aware_utc(now)
+    now_utc = aware_utc(now)
     required_cycle = required_cairo_cycle_date(now_utc)
-    coverage_state = _coverage_state(evidence, required_cycle)
+    coverage_state = assess_catalog_coverage(evidence, now=now_utc)
     latest_complete = evidence.latest_complete
     directly_observed_in_complete = bool(
         coverage_state == "current_complete"
@@ -140,7 +139,7 @@ def _coverage_state(evidence: CompetitorEvidence, required_cycle: date) -> Cover
         return "suspicious_empty"
     if latest.completeness != "complete" or latest.observation_completed_at is None:
         return "unknown"
-    observed_date = _aware_utc(latest.observation_completed_at).astimezone(CAIRO).date()
+    observed_date = aware_utc(latest.observation_completed_at).astimezone(CAIRO).date()
     return "current_complete" if observed_date >= required_cycle else "stale"
 
 
@@ -173,10 +172,4 @@ def _warning(
 def _age_seconds(value: datetime | None, now: datetime) -> int | None:
     if value is None:
         return None
-    return max(0, int((now - _aware_utc(value)).total_seconds()))
-
-
-def _aware_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+    return max(0, int((now - aware_utc(value)).total_seconds()))

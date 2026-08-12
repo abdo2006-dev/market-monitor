@@ -1,7 +1,9 @@
 import axios from 'axios'
 import type {
   BatchCompareSummaryResponse,
+  CollectionExportDownload,
   CollectionExportParams,
+  CollectionExportProvenance,
   CompareResponse,
   Competitor,
   CompetitorInput,
@@ -79,8 +81,69 @@ export const collectionPricesExportUrl = (params: CollectionExportParams): strin
     collection_url: params.collection_url,
     format: params.format,
     max_pages: String(params.max_pages),
+    mode: params.mode || 'live',
   })
+  if (params.include_provenance) query.set('include_provenance', 'true')
   return `${api.defaults.baseURL}/exports/collection-prices?${query.toString()}`
+}
+
+const exportHeader = (headers: Record<string, unknown>, name: string): string | null => {
+  const value = headers[`x-market-monitor-export-${name}`]
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+const exportNumber = (value: string | null): number | null => {
+  if (value === null || value === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+const exportDate = (value: string | null): string | null => value || null
+
+export const parseCollectionExportProvenance = (
+  headers: Record<string, unknown>,
+): CollectionExportProvenance => ({
+  requested_mode: (exportHeader(headers, 'requested-mode') || 'live') as CollectionExportProvenance['requested_mode'],
+  source: (exportHeader(headers, 'source') || 'live') as CollectionExportProvenance['source'],
+  completeness: (exportHeader(headers, 'completeness') || 'unknown') as CollectionExportProvenance['completeness'],
+  products_count: exportNumber(exportHeader(headers, 'products-count')) || 0,
+  pages_fetched: exportNumber(exportHeader(headers, 'pages-fetched')) || 0,
+  page_cap_reached: exportHeader(headers, 'page-cap-reached') === 'true',
+  acquisition_started_at: exportDate(exportHeader(headers, 'acquisition-started-at')),
+  acquisition_completed_at: exportDate(exportHeader(headers, 'acquisition-completed-at')),
+  observation_started_at: exportDate(exportHeader(headers, 'observation-started-at')),
+  observation_completed_at: exportDate(exportHeader(headers, 'observation-completed-at')),
+  safe_reason: exportHeader(headers, 'safe-reason'),
+  cached_coverage_basis: exportHeader(headers, 'cached-coverage-basis'),
+  coverage_state: exportHeader(headers, 'coverage-state') as CollectionExportProvenance['coverage_state'],
+  newest_observed_at: exportDate(exportHeader(headers, 'newest-observed-at')),
+  oldest_observed_at: exportDate(exportHeader(headers, 'oldest-observed-at')),
+  latest_complete_run_id: exportNumber(exportHeader(headers, 'latest-complete-run-id')),
+  latest_complete_at: exportDate(exportHeader(headers, 'latest-complete-at')),
+  latest_terminal_run_id: exportNumber(exportHeader(headers, 'latest-terminal-run-id')),
+  degraded_or_legacy_row_count: exportNumber(exportHeader(headers, 'degraded-or-legacy-row-count')) || 0,
+})
+
+const exportFilename = (contentDisposition: unknown, fallback: string): string => {
+  if (typeof contentDisposition !== 'string') return fallback
+  const match = /filename="?([^";]+)"?/i.exec(contentDisposition)
+  return match?.[1] || fallback
+}
+
+/** Acquire/download bytes synchronously, then let the page present truthful evidence. */
+export const prepareCollectionExport = async (
+  params: CollectionExportParams,
+): Promise<CollectionExportDownload> => {
+  const response = await api.get<Blob>('/exports/collection-prices', {
+    params: { ...params, mode: params.mode || 'live' },
+    responseType: 'blob',
+  })
+  const extension = params.format === 'jsonl' ? 'jsonl' : params.format
+  return {
+    blob: response.data,
+    filename: exportFilename(response.headers, `collection-prices.${extension}`),
+    provenance: parseCollectionExportProvenance(response.headers),
+  }
 }
 
 // Settings

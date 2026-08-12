@@ -309,27 +309,60 @@ export type ScanAllSummary = SyncRequestStatus
 // ── Exports ──────────────────────────────────────────────────────────────────
 
 export type ExportFormat = 'csv' | 'jsonl' | 'json'
+export type ExportMode = 'live' | 'cached'
+export type ExportCompleteness = 'complete' | 'partial' | 'suspicious_empty' | 'failed' | 'unknown'
 
 export interface CollectionExportParams {
   competitor_id: string | number
   collection_url: string
-  format: ExportFormat | string
+  format: ExportFormat
   max_pages: string | number
+  mode?: ExportMode
+  include_provenance?: boolean
 }
 
-/**
- * Shape of the `json` export envelope.
- *
- * NOTE: there is deliberately NO provenance field here, because the backend does
- * not send one. When the live scrape returns nothing, the endpoint silently
- * serves stored products in this identical shape. Phase 1D adds a provenance
- * block — see docs/DAILY_CRITICAL_WORKFLOWS.md §3.1.
- */
+/** File-level acquisition/storage evidence returned in response headers. */
+export interface CollectionExportProvenance {
+  requested_mode: ExportMode
+  source: ExportMode
+  completeness: ExportCompleteness
+  products_count: number
+  pages_fetched: number
+  page_cap_reached: boolean
+  acquisition_started_at: Timestamp | null
+  acquisition_completed_at: Timestamp | null
+  observation_started_at: Timestamp | null
+  observation_completed_at: Timestamp | null
+  safe_reason: string | null
+  cached_coverage_basis: string | null
+  coverage_state: SearchCoverageState | null
+  newest_observed_at: Timestamp | null
+  oldest_observed_at: Timestamp | null
+  latest_complete_run_id: number | null
+  latest_complete_at: Timestamp | null
+  latest_terminal_run_id: number | null
+  degraded_or_legacy_row_count: number
+}
+
+export interface CollectionExportDownload {
+  blob: Blob
+  filename: string
+  provenance: CollectionExportProvenance
+}
+
+export interface CollectionExportFailure {
+  code: 'live_acquisition_failed' | 'cached_export_unavailable'
+  message: string
+  provenance: CollectionExportProvenance
+}
+
+/** The legacy JSON envelope remains compatible; provenance is opt-in. */
 export interface CollectionExportEnvelope {
   competitor: string
   collection_url: string
   products_count: number
   items: CollectionExportRow[]
+  provenance?: CollectionExportProvenance
 }
 
 export interface CollectionExportRow {
@@ -347,4 +380,8 @@ export interface CollectionExportRow {
   image_url: string | null
   /** When the FILE was generated - not when the price was observed. */
   scraped_at: Timestamp
+  /** Present only when `include_provenance=true`. */
+  observed_at?: Timestamp | null
+  observed_run_id?: number | null
+  coverage_state?: SearchCoverageState | null
 }

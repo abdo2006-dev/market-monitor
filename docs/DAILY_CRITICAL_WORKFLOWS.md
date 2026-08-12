@@ -103,7 +103,31 @@ Full semantics, measured performance, query plans, and limitations are in
 
 ## 3. Collection Exports
 
-### How it works today
+### How it works after Phase 1D
+
+`/exports` now defaults to **Live current collection** and requires an explicit
+selection for **Latest stored data**. A live request calls the shared
+completeness-aware acquisition boundary, returns only its own observations, and
+reports `complete`, `partial`, or `suspicious_empty` through typed file headers.
+It never substitutes stored rows. A failed live request is a safe structured
+502 and the UI offers retry or a separately requested stored export.
+
+The browser prepares blob bytes before downloading, so it can show actual source,
+product/page count, cap warning, observation timing, and cached row age range.
+CSV/JSONL defaults retain their historical row shape and JSON retains its historical
+envelope. `include_provenance=true` is the explicit additive metadata extension.
+Full contract and limitations: `docs/EXPORT_ARCHITECTURE.md`.
+
+### Regression protection
+
+`tests/critical/test_export_regression.py` now covers live complete/partial/
+suspicious-empty/failure, explicit cache/legacy cache/no-cache, compatibility of
+all formats and filenames, optional provenance, safe URL validation, and
+read-only behavior. `Exports.test.tsx` covers default live selection, loading,
+complete/partial/stored/failure/no-cache states, confirmation download, and
+accessible controls.
+
+### Historical Phase 1A baseline (resolved by Phase 1D)
 
 ```
 Exports.tsx builds a URL → browser navigates → file downloads
@@ -120,7 +144,7 @@ Exports.tsx builds a URL → browser navigates → file downloads
 Nothing is persisted: no `ScrapeRun`, no products, no events. Exports are
 invisible to the dashboard and to any future rate control.
 
-### Known failure modes
+### Historical failure modes
 
 | # | Failure | Evidence |
 |---|---|---|
@@ -154,9 +178,10 @@ nothing, and it was added deliberately (commit `f346f70`). What is wrong is that
 **the caller cannot tell which happened.** The owner can price against month-old
 data believing it is current.
 
-Phase 1A does **not** change this behaviour. It is characterised and documented.
+Phase 1A did **not** change this behaviour; Phase 1D supersedes it with explicit
+live/cached modes and versioned provenance.
 
-#### Proposed provenance contract (Phase 1D)
+#### Superseded Phase 1A proposal
 
 Every acquisition-backed response gains an explicit provenance block. No
 architecture may allow stale data to silently present as fresh.
@@ -478,9 +503,8 @@ implementable, and `strategy_used` is the diagnostic the current implementation
 throws away.
 
 Phase 1B.2 introduced the immutable `AcquisitionResult` boundary and adapter telemetry for
-Sync without pretending the monolithic scraper is already split. A future refactor can
-extract typed adapters/`ProductObservation`; Export still requires its Phase 1D provenance
-work before consuming this contract.
+Sync without pretending the monolithic scraper is already split. Phase 1D consumes that
+boundary for Live Export; a future refactor can extract typed adapters/`ProductObservation`.
 
 ---
 
@@ -498,10 +522,11 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:543
 | `test_product_integrity.py` | 5 | identity contract, constraints, audit and consolidation |
 | `test_sync_lifecycle.py` | 32 | durable requests/claims/leases/retries, completeness, freshness, lineage, API/worker |
 | `test_search_regression.py` | 35 | matching/guarded fallback/grouping, trust, currencies, reliable/observed summaries, snapshots, active Sync |
-| `test_export_regression.py` | 28 | validation, formats, fields, fallback provenance |
-| **critical total** | **142** | plus 71 non-critical tests = **213 backend tests** |
+| `test_export_regression.py` | 24 | validation, formats, live/cached truth, completeness, provenance, lineage |
+| **critical total** | **138** | plus 71 non-critical tests = **209 backend tests** |
 
-The frontend adds 8 Vitest/Testing Library cases for the daily Search interaction.
+The frontend adds 16 Vitest/Testing Library cases for the daily Search and Export
+interactions.
 
 Database-backed tests **skip** when `TEST_DATABASE_URL` is unset, and CI fails if
 that happens there (`.github/workflows/ci.yml`).

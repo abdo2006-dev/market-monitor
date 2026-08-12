@@ -1,6 +1,6 @@
 # Data Flow
 
-Current as of Phase 1B.2. `→` is a call and `[TX]` is a committed PostgreSQL
+Current as of Phase 1D. `→` is a call and `[TX]` is a committed PostgreSQL
 transaction. Sync V2 is the default; legacy execution remains only behind
 `SYNC_EXECUTION_MODE=legacy`.
 
@@ -177,10 +177,25 @@ Product observation age and complete-catalog age remain separate. Active Sync is
 overlay; request acceptance never means refreshed. Full rules and measurements:
 `docs/SEARCH_ARCHITECTURE.md`.
 
-Export remains the existing synchronous flow and its provenance defect remains Phase 1D
-work.
+## Flow 9 — Truthful synchronous collection export
 
-## Flow 9 — Execution provider and notification boundaries
+```text
+Exports UI -> explicit live | cached mode
+  -> GET /api/exports/collection-prices
+     -> validate selected public same-host collection URL
+     -> live: acquire_catalog -> AcquisitionResult -> file + provenance headers
+     -> cached: matching active Product rows + durable coverage summary -> file + headers
+  <- browser holds prepared Blob, renders truth, then downloads on confirmation
+```
+
+Live Export is intentionally read-only and never creates a durable Sync run.
+`live` never falls back to stored rows: complete, partial, and suspicious-empty
+are file-level completeness outcomes; a live failure is a safe 502. `cached` is
+an explicit stored-data request and reports row observation range, genuine run
+lineage where available, and mixed/legacy coverage limits. See
+`docs/EXPORT_ARCHITECTURE.md`.
+
+## Flow 10 — Execution provider and notification boundaries
 
 The GitHub dispatcher is an infrastructure adapter invoked only after the request commit.
 The worker CLI contains no GitHub API code and can run unchanged on Railway or locally.

@@ -1,8 +1,9 @@
 # Testing
 
-> **Phase 1C update.** Sections 1–3 below describe historical gaps at the Phase 0
+> **Phase 1D update.** Sections 1–3 below describe historical gaps at the Phase 0
 > baseline. Phase 1A/1B.1 added daily-path and product-integrity coverage, Phase 1B.2 added
-> a real PostgreSQL lifecycle suite, and Phase 1C adds Search trust plus frontend behavior
+> a real PostgreSQL lifecycle suite, Phase 1C adds Search trust, and Phase 1D adds Export
+> provenance plus frontend behavior
 > tests, so
 > several "not covered" claims are now out of date. Current state: **§0** and
 > `docs/DAILY_CRITICAL_WORKFLOWS.md` §9. The target pyramid in §4 is unchanged and still
@@ -10,11 +11,11 @@
 
 ---
 
-## 0. Current state (Phase 1C Search)
+## 0. Current state (Phase 1D Export)
 
-The Phase 1C gate is **213 passed** against migrated PostgreSQL: 71 non-critical cases and
-142 critical cases. The focused lifecycle suite contains 32 cases. The frontend has 8
-Market Search behavior tests.
+The Phase 1D gate is **209 passed** against migrated PostgreSQL: 71 non-critical cases and
+138 critical cases. The focused lifecycle suite contains 32 cases. The frontend has 16
+daily-workflow behavior tests (8 Search and 8 Export).
 
 ```bash
 docker run -d --rm --name mm_pg -e POSTGRES_USER=market -e POSTGRES_PASSWORD=market -e POSTGRES_DB=market_monitor -p 5432:5432 postgres:16-alpine
@@ -38,7 +39,7 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:543
 | `tests/critical/test_product_integrity.py` | 5 | identity semantics, database constraints, duplicate audit/consolidation |
 | `tests/critical/test_sync_lifecycle.py` | 32 | requests, idempotency, claims, leases, retries, page/batch observation ordering, completeness, freshness, lineage, API/worker truthfulness |
 | `tests/critical/test_search_regression.py` | 35 | matching and guarded fallback, grouping, typed contract, trust states, currencies, reliable/observed summaries, snapshots, active Sync |
-| `tests/critical/test_export_regression.py` | 28 | validation, formats, fields, fallback provenance |
+| `tests/critical/test_export_regression.py` | 24 | live/cached mode truth, completeness, safe failures, provenance, compatibility, URL safety, lineage |
 
 Harness: `tests/conftest.py`. Marker: `-m critical` / `-m "not critical"`.
 
@@ -55,9 +56,9 @@ completion-order inversion (`$5` observed earlier cannot beat `$3` observed late
 equal-time run-ID tie-breaking, rejection of storefront timestamps, HTTP 202 durability,
 dispatch failure truthfulness, and worker clean exit.
 
-Frontend `src/pages/MarketSearch.test.tsx` uses Vitest + Testing Library for loading,
-success, degraded freshness, no reliable result, no suggestions, API error, active Sync,
-and truthful accepted-request wording. Run it with `npm run test:run`.
+Frontend `src/pages/MarketSearch.test.tsx` and `src/pages/Exports.test.tsx` use Vitest +
+Testing Library for daily Search and Export loading/success/degradation/failure states and
+truthful operator actions. Run them with `npm run test:run`.
 
 **Still missing**: backend lint/type checking, browser E2E automation in CI, and
 integration coverage for the Dashboard/Activity/notification paths. `npm run lint` remains

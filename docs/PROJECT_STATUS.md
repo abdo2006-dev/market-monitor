@@ -3,16 +3,17 @@
 **Read this first.** This is the handoff file between working sessions. If it is stale,
 fix it as part of the task.
 
-_Last updated: 2026-08-12, Phase 1C Search verified locally._
+_Last updated: 2026-08-12, Phase 1D Export verified locally._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Phase 1C Search complete locally** — ready for Phase 1D Export development; production merge, migration, and one-competitor Sync proof remain manual. |
-| **Phase 1C base** | `c7c6f32ec6eaa6085be70ec80e6f0627ee33614c` |
+| **Current phase** | **Phase 1D Export complete locally** — ready for review and the separately authorized release/proof gate; no production action was taken. |
+| **Phase 1D base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` (Phase 1C checkpoint) |
+| **Phase 1C base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` |
 | **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
-| **Working branch** | `v2/search-trust-ui` |
+| **Working branch** | `v2/export-provenance-ui` |
 | **Migration head** | `0005_durable_sync_lifecycle` |
 | **Archive baseline** | `archive/pre-v2-rearchitecture` → `f346f70`; do not move or delete. |
 | **Production** | Not inspected, migrated, dispatched, or deployed by this phase. |
@@ -50,6 +51,34 @@ view of undifferentiated stored rows.
 
 Full flow, semantics, profile, query plans, UI ownership, and limitations:
 `docs/SEARCH_ARCHITECTURE.md`.
+
+## 2.1 Phase 1D outcome
+
+`/exports` is now an honest daily collection-download workflow.
+
+- Live is the default and calls the shared `acquire_catalog()` boundary. It returns only
+  observations from this request, with complete/partial/suspicious-empty evidence. It never
+  substitutes `Product` rows.
+- Live acquisition failure returns a safe structured 502. Cached data is a separately
+  selected mode; unavailable cached data returns a safe structured 404.
+- Default CSV, JSONL, JSON envelope, filenames, title sort, and browser download behavior
+  remain compatible. `X-Market-Monitor-Export-*` headers carry typed source, completeness,
+  cap, page/count, time, coverage, and lineage evidence. `include_provenance=true` is the
+  explicit additive payload extension.
+- Cached files disclose row observation range, real latest complete/terminal run IDs, shared
+  Cairo-cycle coverage state, and legacy/mixed-lineage counts. Durable collection membership
+  does not yet exist, so cached collection reconstruction remains alias-based and disclosed.
+- The responsive Exports page prepares a Blob before download, shows loading, complete,
+  partial, suspicious-empty, stored, failure, and no-cache states, then requires explicit
+  download confirmation. A mobile browser check found and fixed a sidebar-width issue.
+- No schema/model migration was needed. `domain.market_cycle` is the one owner of the Cairo
+  recovery boundary, and Export reuses the Search catalog-coverage policy.
+
+The local 1,250-row CSV+JSON serialization profile compared the Phase 1C export helper to
+Phase 1D over 20 samples of 20 repetitions: median **7.35 ms → 7.34 ms**, p95 **7.40 ms →
+7.43 ms**. This excludes provider/network acquisition, which remains the dominant and
+already bounded request cost; no queue/cache/object-store/export-run infrastructure is
+justified by this evidence. Full details: `docs/EXPORT_ARCHITECTURE.md`.
 
 ## 3. Phase 1B.2 outcome
 
@@ -197,9 +226,10 @@ used.
 
 | Gate | Result |
 |---|---|
-| Full backend | **213 passed**, 11 pre-existing warnings |
-| Critical path | **142 passed**, 71 deselected |
+| Full backend | **209 passed**, 11 pre-existing warnings |
+| Critical path | **138 passed**, 71 deselected |
 | Phase 1C Search | **39 passed**: 35 PostgreSQL critical + 4 pure cycle-policy |
+| Phase 1D Export + cycle policy | **28 passed**: 24 PostgreSQL critical + 4 pure policy |
 | Phase 1A daily/schema regression | **93 passed** |
 | Phase 1B.1 Sync/integrity | **37 passed** |
 | Phase 1B.2 lifecycle | **32 passed**, including 5 claim-race iterations |
@@ -207,10 +237,9 @@ used.
 | Completeness safety selection | **5 passed** |
 | Fresh / prior-`0004` upgrade | both reached `0005` head |
 | Alembic drift | `No new upgrade operations detected` |
-| Frontend tests | **8 passed** with Vitest + Testing Library |
-| Frontend typecheck/build | pass; 2,413 modules, 704.45 kB main chunk |
-| Startup/workflow | 36 routes with five Sync V2 routes; 2 YAML/security tests pass |
-| Diff/secret safety | `git diff --check` and staged Gitleaks scan pass |
+| Frontend tests | **16 passed** with Vitest + Testing Library (8 Search + 8 Export) |
+| Frontend typecheck/build | pass; 2,414 modules, 710.51 kB main chunk |
+| Startup/workflow | startup import passes with 36 routes; 2 YAML/security tests pass |
 
 Known pre-existing warnings remain: Pydantic class-based config, FastAPI `on_event`, the
 custom pytest-asyncio loop fixture, Starlette's multipart import, React Router v7 future
@@ -237,13 +266,20 @@ available gate because ESLint is not installed.
   requires a policy/test update.
 - Snapshot history records changes, not every observation, so Search shows recent change
   context rather than a dense price series.
+- Export URL validation rejects malformed, credentialed, foreign, localhost, and literal
+  private targets, but DNS rebinding and cross-host redirects remain adapter-level limits.
+- Export remains a synchronous request. A slow provider can still meet the existing adapter
+  timeout but exceed an eventual deployment request ceiling; production proof must exercise
+  a bounded known collection.
 
 ## 9. Next recommended task
 
-Begin **Phase 1D: make `/exports` truthful about live versus cached/partial data, reliable
-for daily use, and visually polished.** Preserve Search and Sync contracts. Production
-rollout remains independently gated by the merge/migration/smoke checklist in
-`docs/RUNBOOK.md`; do not start Export work in the Phase 1C checkpoint.
+Begin the **Phase 1D release/proof gate** after review: merge the checkpoint, run the
+documented read-only production classification and startup checks, then perform one
+bounded non-Shopbloxs competitor Sync and one explicit live/cached Export proof. Do not
+expand Export persistence or add an ExportRun table before that evidence. The first
+subsequent engineering task should be the smallest safe extraction of the duplicated
+collection taxonomy into one authoritative owner.
 
 ## 10. Decisions not to reverse
 

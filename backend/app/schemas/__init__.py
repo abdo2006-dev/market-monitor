@@ -309,6 +309,46 @@ class SearchCompareResponse(BaseModel):
     market_summary: SearchMarketSummary
 
 
+# ── Collection export ───────────────────────────────────────────────────────
+
+class CollectionExportProvenance(BaseModel):
+    """File-level evidence carried in export response headers.
+
+    CSV and JSONL keep their established row schemas.  The browser reads this
+    typed shape from ``X-Market-Monitor-Export-*`` headers, while callers that
+    explicitly request ``include_provenance=true`` also receive it in the JSON
+    envelope.
+    """
+
+    requested_mode: Literal["live", "cached"]
+    source: Literal["live", "cached"]
+    completeness: Literal["complete", "partial", "suspicious_empty", "failed", "unknown"]
+    products_count: int
+    pages_fetched: int = 0
+    page_cap_reached: bool = False
+    acquisition_started_at: Optional[datetime] = None
+    acquisition_completed_at: Optional[datetime] = None
+    observation_started_at: Optional[datetime] = None
+    observation_completed_at: Optional[datetime] = None
+    safe_reason: Optional[str] = None
+    cached_coverage_basis: Optional[str] = None
+    coverage_state: Optional[Literal[
+        "current_complete", "partial", "suspicious_empty", "failed", "stale", "unknown"
+    ]] = None
+    newest_observed_at: Optional[datetime] = None
+    oldest_observed_at: Optional[datetime] = None
+    latest_complete_run_id: Optional[int] = None
+    latest_complete_at: Optional[datetime] = None
+    latest_terminal_run_id: Optional[int] = None
+    degraded_or_legacy_row_count: int = 0
+
+
+class CollectionExportFailure(BaseModel):
+    code: Literal["live_acquisition_failed", "cached_export_unavailable"]
+    message: str
+    provenance: CollectionExportProvenance
+
+
 # ── Settings ─────────────────────────────────────────────────────────────────
 
 class AppSettingsOut(BaseModel):

@@ -1,41 +1,55 @@
-"""
-C2 — Collection Export regression coverage.
-
-Exercises /api/exports/collection-prices end to end against a real database,
-with the network-facing scraper replaced by deterministic fixtures.
-
-Includes explicit characterisation of the saved-data fallback, which is a
-product risk: the UI presents this as a live scrape, but when the live scrape
-returns nothing the endpoint silently serves stored products instead, with
-nothing in the payload or headers distinguishing the two. See
-docs/DAILY_CRITICAL_WORKFLOWS.md "Export provenance".
-"""
+"""Phase 1D collection-export provenance, compatibility, and safety coverage."""
 from __future__ import annotations
 
 import csv
 import io
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.domain.acquisition import AcquisitionFailure, AcquisitionResult
+from app.models import ScrapeRun
 from tests.conftest import requires_db
 from tests.critical.factories import make_competitor, make_product, observation
+
 
 pytestmark = [pytest.mark.critical, requires_db]
 
 COLLECTION_URL = "https://alpha.example/collections/murder-mystery-2"
+OBSERVED_AT = datetime(2026, 8, 12, 7, 30, tzinfo=timezone.utc)
 
 
-def patch_export_scraper(monkeypatch, result):
-    """
-    Replace the scraper used by the export route.
+def shopify_fixture() -> list[dict]:
+    return [
+        observation("Corrupted Batwing", price=25.50, currency="USD", url="https://alpha.example/products/corrupted-batwing", image_url="https://cdn.shopify.com/x/corrupted-batwing.png", stock_status="in_stock", sku="MM2-CB-01", external_id="111:222", category="Murder Mystery 2"),
+        observation("Chill Knife", price=4.00, currency="USD", url="https://alpha.example/products/chill-knife", image_url="https://cdn.shopify.com/x/chill-knife.png", stock_status="out_of_stock", sku="MM2-CK-01", external_id="333:444", category="Murder Mystery 2"),
+        observation("Priceless Relic", price=None, currency="USD", url="https://alpha.example/products/priceless-relic", stock_status="unknown", category="Murder Mystery 2"),
+    ]
 
-    `app.api.exports` does `from app.services.scraper import scrape_competitor`
-    at module level, so the name must be patched in the exports module.
-    """
+
+def acquisition(
+    products: list[dict], *, completeness: str = "complete", pages: int = 1,
+    page_cap_reached: bool = False, reason: str | None = None,
+) -> AcquisitionResult:
+    observations = [{**product, "observed_at": OBSERVED_AT} for product in products]
+    return AcquisitionResult(
+        observations=observations,
+        strategy="shopify_products_json_aiohttp",
+        started_at=OBSERVED_AT - timedelta(seconds=2),
+        completed_at=OBSERVED_AT + timedelta(seconds=1),
+        pages_fetched=pages,
+        request_count=pages,
+        completeness=completeness,  # type: ignore[arg-type]
+        page_cap_reached=page_cap_reached,
+        completeness_reason=reason or {"complete": "Adapter reached a catalog end signal", "partial": "Pagination cap reached while another page may exist", "suspicious_empty": "Unexpected zero-product result; absence inference disabled"}[completeness],
+    )
+
+
+def patch_export_acquisition(monkeypatch, result):
     captured = {}
 
-    async def fake_scrape(competitor, **kwargs):
+    async def fake_acquire(competitor, **kwargs):
         captured["competitor"] = competitor
         captured["kwargs"] = kwargs
         if isinstance(result, Exception):
@@ -43,50 +57,36 @@ def patch_export_scraper(monkeypatch, result):
         return result
 
     import app.api.exports as exports_module
-
-    monkeypatch.setattr(exports_module, "scrape_competitor", fake_scrape)
+    monkeypatch.setattr(exports_module, "acquire_collection", fake_acquire)
     return captured
 
 
-def shopify_fixture() -> list[dict]:
-    """A typical Shopify collection result, in the scraper's current dict shape."""
-    return [
-        observation(
-            "Corrupted Batwing", price=25.50, currency="USD",
-            url="https://alpha.example/products/corrupted-batwing",
-            image_url="https://cdn.shopify.com/x/corrupted-batwing.png",
-            stock_status="in_stock", sku="MM2-CB-01", external_id="111:222",
-            category="Murder Mystery 2",
-        ),
-        observation(
-            "Chill Knife", price=4.00, currency="USD",
-            url="https://alpha.example/products/chill-knife",
-            image_url="https://cdn.shopify.com/x/chill-knife.png",
-            stock_status="out_of_stock", sku="MM2-CK-01", external_id="333:444",
-            category="Murder Mystery 2",
-        ),
-        observation(
-            "Priceless Relic", price=None, currency="USD",
-            url="https://alpha.example/products/priceless-relic",
-            stock_status="unknown", category="Murder Mystery 2",
-        ),
-    ]
-
-
 async def alpha_competitor(session):
-    competitor = await make_competitor(
-        session, "Alpha Store", "https://alpha.example", scrape_type="shopify_json"
-    )
+    competitor = await make_competitor(session, "Alpha Store", "https://alpha.example", scrape_type="shopify_json")
     await session.commit()
     return competitor
 
 
 async def export(api_client, competitor_id, **params):
-    query = {"competitor_id": competitor_id, "collection_url": COLLECTION_URL, **params}
-    return await api_client.get("/api/exports/collection-prices", params=query)
+    return await api_client.get("/api/exports/collection-prices", params={"competitor_id": competitor_id, "collection_url": COLLECTION_URL, **params})
 
 
-# ── Validation ────────────────────────────────────────────────────────────────
+def provenance(response) -> dict[str, str]:
+    return {key.lower(): value for key, value in response.headers.items() if key.lower().startswith("x-market-monitor-export-")}
+
+
+async def make_complete_run(session, competitor, *, observed_at=OBSERVED_AT):
+    run = ScrapeRun(
+        competitor_id=competitor.id, status="success", trigger="manual",
+        completeness="complete", observation_completed_at=observed_at,
+        terminal_at=observed_at + timedelta(seconds=1), finished_at=observed_at + timedelta(seconds=1),
+    )
+    session.add(run)
+    await session.flush()
+    return run
+
+
+# Validation and compatibility -------------------------------------------------
 
 async def test_unknown_competitor_returns_404(db_session, api_client):
     resp = await export(api_client, 999999)
@@ -94,356 +94,216 @@ async def test_unknown_competitor_returns_404(db_session, api_client):
     assert resp.json()["detail"] == "Competitor not found"
 
 
-@pytest.mark.parametrize(
-    "bad_url",
-    [
-        "not-a-url",
-        "ftp://alpha.example/collections/x",
-        "/collections/relative-only",
-        "javascript:alert(1)",
-    ],
-)
-async def test_non_absolute_or_non_http_urls_are_rejected(
-    db_session, api_client, bad_url
-):
+@pytest.mark.parametrize("bad_url", ["not-a-url", "ftp://alpha.example/collections/x", "/collections/relative-only", "javascript:alert(1)"])
+async def test_non_absolute_or_non_http_urls_are_rejected(db_session, api_client, bad_url):
     competitor = await alpha_competitor(db_session)
-    resp = await api_client.get(
+    response = await api_client.get("/api/exports/collection-prices", params={"competitor_id": competitor.id, "collection_url": bad_url})
+    assert response.status_code == 400
+    assert "absolute http(s) URL" in response.json()["detail"]
+
+
+async def test_foreign_credentialed_and_private_hosts_are_rejected(db_session, api_client):
+    competitor = await alpha_competitor(db_session)
+    for url in (
+        "https://attacker.example/collections/x",
+        "https://user:pass@alpha.example/collections/x",
+        "https://alpha.example:8443/collections/x",
+    ):
+        response = await api_client.get("/api/exports/collection-prices", params={"competitor_id": competitor.id, "collection_url": url})
+        assert response.status_code == 400
+    local = await make_competitor(db_session, "Local", "http://127.0.0.1", scrape_type="shopify_json")
+    await db_session.commit()
+    response = await api_client.get("/api/exports/collection-prices", params={"competitor_id": local.id, "collection_url": "http://127.0.0.1/collections/x"})
+    assert response.status_code == 400
+    assert "local or private" in response.json()["detail"]
+
+
+async def test_www_collection_url_is_allowed_for_the_selected_competitor(db_session, api_client, monkeypatch):
+    competitor = await alpha_competitor(db_session)
+    patch_export_acquisition(monkeypatch, acquisition(shopify_fixture()))
+    response = await api_client.get(
         "/api/exports/collection-prices",
-        params={"competitor_id": competitor.id, "collection_url": bad_url},
+        params={"competitor_id": competitor.id, "collection_url": "https://www.alpha.example/collections/murder-mystery-2"},
     )
-    assert resp.status_code == 400
-    assert "absolute http(s) URL" in resp.json()["detail"]
+    assert response.status_code == 200
 
 
-async def test_foreign_host_is_rejected(db_session, api_client):
-    """SSRF guard: the collection must belong to the selected competitor."""
+@pytest.mark.parametrize("max_pages,status", [(0, 422), (21, 422), (1, 200), (20, 200)])
+async def test_max_pages_bounds_and_payload_forwarding(db_session, api_client, monkeypatch, max_pages, status):
     competitor = await alpha_competitor(db_session)
-    resp = await api_client.get(
-        "/api/exports/collection-prices",
-        params={
-            "competitor_id": competitor.id,
-            "collection_url": "https://attacker.example/collections/x",
-        },
-    )
-    assert resp.status_code == 400
-    assert "must belong to the selected competitor" in resp.json()["detail"]
+    captured = patch_export_acquisition(monkeypatch, acquisition(shopify_fixture()))
+    response = await export(api_client, competitor.id, max_pages=max_pages)
+    assert response.status_code == status
+    if status == 200:
+        assert captured["kwargs"]["max_pages"] == max_pages
+        config = captured["competitor"]["selector_config"]
+        assert config["discover_collections"] is False
+        assert config["include_all_products"] is False
+        assert config["collection_handles"] == ["murder-mystery-2"]
 
 
-async def test_www_prefix_is_accepted_as_same_host(db_session, api_client, monkeypatch):
+@pytest.mark.parametrize("fmt,content_type,filename", [
+    ("csv", "text/csv", "alpha-store-murder-mystery-2-prices.csv"),
+    ("jsonl", "application/x-ndjson", "alpha-store-murder-mystery-2-prices.jsonl"),
+    ("json", "application/json", "alpha-store-murder-mystery-2-prices.json"),
+])
+async def test_default_file_formats_and_filenames_remain_compatible(db_session, api_client, monkeypatch, fmt, content_type, filename):
     competitor = await alpha_competitor(db_session)
-    patch_export_scraper(monkeypatch, shopify_fixture())
+    patch_export_acquisition(monkeypatch, acquisition(shopify_fixture()))
+    response = await export(api_client, competitor.id, format=fmt)
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(content_type)
+    assert response.headers["content-disposition"] == f'attachment; filename="{filename}"'
+    assert provenance(response)["x-market-monitor-export-source"] == "live"
+    if fmt == "csv":
+        rows = list(csv.DictReader(io.StringIO(response.text)))
+        assert list(rows[0]) == ["competitor_name", "competitor_base_url", "collection_url", "category", "title", "price", "currency", "stock_status", "sku", "external_id", "product_url", "image_url", "scraped_at"]
+        assert [row["title"] for row in rows] == ["Chill Knife", "Corrupted Batwing", "Priceless Relic"]
+        assert rows[1]["price"] == "25.5"
+    elif fmt == "jsonl":
+        rows = [json.loads(line) for line in response.text.splitlines()]
+        assert len(rows) == 3 and rows[1]["price"] == 25.5 and rows[2]["price"] is None
+    else:
+        body = response.json()
+        assert set(body) == {"competitor", "collection_url", "products_count", "items"}
+        assert body["products_count"] == 3
 
-    resp = await api_client.get(
-        "/api/exports/collection-prices",
-        params={
-            "competitor_id": competitor.id,
-            "collection_url": "https://www.alpha.example/collections/murder-mystery-2",
-        },
-    )
-    assert resp.status_code == 200
 
-
-@pytest.mark.parametrize("max_pages,expected_status", [(0, 422), (21, 422), (1, 200), (20, 200)])
-async def test_max_pages_bounds(
-    db_session, api_client, monkeypatch, max_pages, expected_status
-):
+async def test_optional_provenance_is_versioned_not_a_default_schema_change(db_session, api_client, monkeypatch):
     competitor = await alpha_competitor(db_session)
-    patch_export_scraper(monkeypatch, shopify_fixture())
+    patch_export_acquisition(monkeypatch, acquisition(shopify_fixture()))
+    response = await export(api_client, competitor.id, format="json", include_provenance=True)
+    body = response.json()
+    assert body["provenance"]["source"] == "live"
+    assert body["items"][0]["observed_at"] == OBSERVED_AT.isoformat()
+    assert response.headers["x-market-monitor-export-provenance-version"] == "1"
 
-    resp = await export(api_client, competitor.id, max_pages=max_pages)
-    assert resp.status_code == expected_status
 
-
-async def test_max_pages_is_forwarded_to_the_scraper(db_session, api_client, monkeypatch):
+async def test_unicode_missing_fields_and_numeric_prices_survive_serialization(db_session, api_client, monkeypatch):
     competitor = await alpha_competitor(db_session)
-    captured = patch_export_scraper(monkeypatch, shopify_fixture())
-
-    await export(api_client, competitor.id, max_pages=7)
-
-    assert captured["kwargs"]["max_pages"] == 7
-    # The export path narrows the scrape to one collection and shortens timeouts.
-    config = captured["competitor"]["selector_config"]
-    assert config["discover_collections"] is False
-    assert config["include_all_products"] is False
-    assert config["request_timeout_seconds"] == 8
-    assert config["collection_handles"] == ["murder-mystery-2"]
-    assert captured["competitor"]["listing_urls"] == [COLLECTION_URL]
+    patch_export_acquisition(monkeypatch, acquisition([
+        observation('Élite, "Knife"', price=12.34, currency="EUR", url="https://alpha.example/products/elite"),
+    ]))
+    response = await export(api_client, competitor.id, format="csv")
+    row = next(csv.DictReader(io.StringIO(response.text)))
+    assert row["title"] == 'Élite, "Knife"'
+    assert row["price"] == "12.34"
+    assert row["sku"] == ""
+    assert row["image_url"] == ""
 
 
-# ── Formats and field correctness ─────────────────────────────────────────────
+# Live truth ---------------------------------------------------------------
 
-async def test_csv_export_fields_and_values(db_session, api_client, monkeypatch):
+async def test_live_complete_exports_coherent_observations_with_truthful_headers(db_session, api_client, monkeypatch):
     competitor = await alpha_competitor(db_session)
-    patch_export_scraper(monkeypatch, shopify_fixture())
-
-    resp = await export(api_client, competitor.id, format="csv")
-    assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("text/csv")
-
-    rows = list(csv.DictReader(io.StringIO(resp.text)))
-    assert [r["title"] for r in rows] == [
-        "Chill Knife", "Corrupted Batwing", "Priceless Relic"
-    ], "rows are sorted by lowercased title"
-
-    batwing = next(r for r in rows if r["title"] == "Corrupted Batwing")
-    assert batwing["price"] == "25.5"
-    assert batwing["currency"] == "USD"
-    assert batwing["stock_status"] == "in_stock"
-    assert batwing["product_url"] == "https://alpha.example/products/corrupted-batwing"
-    assert batwing["image_url"] == "https://cdn.shopify.com/x/corrupted-batwing.png"
-    assert batwing["category"] == "Murder Mystery 2"
-    assert batwing["sku"] == "MM2-CB-01"
-    assert batwing["external_id"] == "111:222"
-    assert batwing["competitor_name"] == "Alpha Store"
-    assert batwing["competitor_base_url"] == "https://alpha.example"
-    assert batwing["collection_url"] == COLLECTION_URL
-    assert batwing["scraped_at"]
-
-    priceless = next(r for r in rows if r["title"] == "Priceless Relic")
-    assert priceless["price"] == "", "a missing price serialises as empty, not 0"
-    assert priceless["stock_status"] == "unknown"
+    patch_export_acquisition(monkeypatch, acquisition(shopify_fixture(), pages=2))
+    response = await export(api_client, competitor.id, format="json")
+    headers = provenance(response)
+    assert response.status_code == 200
+    assert headers["x-market-monitor-export-requested-mode"] == "live"
+    assert headers["x-market-monitor-export-source"] == "live"
+    assert headers["x-market-monitor-export-completeness"] == "complete"
+    assert headers["x-market-monitor-export-pages-fetched"] == "2"
+    assert headers["x-market-monitor-export-observation-completed-at"] == OBSERVED_AT.isoformat()
+    assert response.json()["items"][1]["product_url"] == "https://alpha.example/products/corrupted-batwing"
 
 
-async def test_jsonl_export_is_one_object_per_line(db_session, api_client, monkeypatch):
+async def test_live_partial_is_downloadable_and_never_claimed_complete(db_session, api_client, monkeypatch):
     competitor = await alpha_competitor(db_session)
-    patch_export_scraper(monkeypatch, shopify_fixture())
+    products = [
+        observation(f"Shopify Item {number}", price=number + 0.25, url=f"https://alpha.example/products/{number}")
+        for number in range(1_250)
+    ]
+    patch_export_acquisition(monkeypatch, acquisition(products, completeness="partial", pages=5, page_cap_reached=True))
+    response = await export(api_client, competitor.id, format="json")
+    headers = provenance(response)
+    assert response.status_code == 200
+    assert response.json()["products_count"] == 1_250
+    assert headers["x-market-monitor-export-completeness"] == "partial"
+    assert headers["x-market-monitor-export-page-cap-reached"] == "true"
+    assert "Pagination cap" in headers["x-market-monitor-export-safe-reason"]
 
-    resp = await export(api_client, competitor.id, format="jsonl")
-    assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("application/x-ndjson")
 
-    lines = [line for line in resp.text.split("\n") if line]
-    assert len(lines) == 3
-    records = [json.loads(line) for line in lines]
-    assert records[1]["title"] == "Corrupted Batwing"
-    assert records[1]["price"] == 25.5
-    assert records[2]["price"] is None
-
-
-async def test_json_export_has_envelope(db_session, api_client, monkeypatch):
+async def test_live_partial_request_failure_remains_explicitly_partial(db_session, api_client, monkeypatch):
     competitor = await alpha_competitor(db_session)
-    patch_export_scraper(monkeypatch, shopify_fixture())
+    patch_export_acquisition(monkeypatch, acquisition(
+        shopify_fixture()[:1],
+        completeness="partial",
+        reason="One or more catalog source requests failed; absence inference disabled",
+    ))
+    response = await export(api_client, competitor.id, format="json")
+    assert response.status_code == 200
+    assert provenance(response)["x-market-monitor-export-completeness"] == "partial"
+    assert "source requests failed" in provenance(response)["x-market-monitor-export-safe-reason"]
 
-    resp = await export(api_client, competitor.id, format="json")
-    assert resp.status_code == 200
-    body = resp.json()
 
-    assert body["competitor"] == "Alpha Store"
-    assert body["collection_url"] == COLLECTION_URL
-    assert body["products_count"] == 3
-    assert len(body["items"]) == 3
-
-
-async def test_invalid_format_is_rejected(db_session, api_client):
+async def test_live_suspicious_empty_never_substitutes_cached_products(db_session, api_client, monkeypatch):
     competitor = await alpha_competitor(db_session)
-    resp = await export(api_client, competitor.id, format="xlsx")
-    assert resp.status_code == 422
+    await make_product(db_session, competitor, "Stale Batwing", price="99.99", category="Murder Mystery 2", url="https://alpha.example/products/stale-batwing")
+    await db_session.commit()
+    patch_export_acquisition(monkeypatch, acquisition([], completeness="suspicious_empty", pages=1))
+    response = await export(api_client, competitor.id, format="json")
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    assert provenance(response)["x-market-monitor-export-source"] == "live"
+    assert provenance(response)["x-market-monitor-export-completeness"] == "suspicious_empty"
 
 
-@pytest.mark.parametrize(
-    "fmt,expected",
-    [
-        ("csv", "alpha-store-murder-mystery-2-prices.csv"),
-        ("jsonl", "alpha-store-murder-mystery-2-prices.jsonl"),
-        ("json", "alpha-store-murder-mystery-2-prices.json"),
-    ],
-)
-async def test_filename_is_deterministic(db_session, api_client, monkeypatch, fmt, expected):
+async def test_live_failure_is_safe_structured_error_and_never_falls_back(db_session, api_client, monkeypatch):
     competitor = await alpha_competitor(db_session)
-    patch_export_scraper(monkeypatch, shopify_fixture())
+    await make_product(db_session, competitor, "Stale Batwing", price="99.99", category="Murder Mystery 2", url="https://alpha.example/products/stale-batwing")
+    await db_session.commit()
+    patch_export_acquisition(monkeypatch, AcquisitionFailure("temporary_network", "Storefront request timed out", True))
+    response = await export(api_client, competitor.id, format="json")
+    body = response.json()["detail"]
+    assert response.status_code == 502
+    assert body["code"] == "live_acquisition_failed"
+    assert body["provenance"]["source"] == "live"
+    assert body["provenance"]["completeness"] == "failed"
+    assert "timed out" not in json.dumps(body).lower()
 
-    resp = await export(api_client, competitor.id, format=fmt)
-    assert resp.headers["content-disposition"] == f'attachment; filename="{expected}"'
 
-
-async def test_export_does_not_persist_anything(db_session, api_client, monkeypatch):
-    """
-    Export is read-only with respect to market intelligence: no ScrapeRun, no
-    products, no events. This means exports are invisible to the dashboard and
-    to any future rate control - characterised in docs/DATA_FLOW.md Flow 8.
-    """
+async def test_export_remains_read_only(db_session, api_client, monkeypatch):
     from tests.critical.factories import counts
-
     competitor = await alpha_competitor(db_session)
-    patch_export_scraper(monkeypatch, shopify_fixture())
-
+    patch_export_acquisition(monkeypatch, acquisition(shopify_fixture()))
     await export(api_client, competitor.id)
-
-    summary = await counts(db_session, competitor.id)
-    assert summary == {
-        "products": 0, "active_products": 0, "snapshots": 0, "events": 0, "runs": 0
-    }
+    assert await counts(db_session, competitor.id) == {"products": 0, "active_products": 0, "snapshots": 0, "events": 0, "runs": 0}
 
 
-# ── Partial and empty results ─────────────────────────────────────────────────
+# Explicit cache -----------------------------------------------------------
 
-async def test_partial_scrape_exports_whatever_was_returned(
-    db_session, api_client, monkeypatch
-):
-    """
-    A truncated scrape (one page of three) is indistinguishable from a complete
-    one in the response. There is no completeness signal.
-    """
+async def test_explicit_cached_mode_returns_stored_rows_with_lineage_and_cycle_state(db_session, api_client):
     competitor = await alpha_competitor(db_session)
-    patch_export_scraper(monkeypatch, shopify_fixture()[:1])
-
-    body = (await export(api_client, competitor.id, format="json")).json()
-
-    assert body["products_count"] == 1
-    assert "partial" not in json.dumps(body).lower()
-    assert "provenance" not in body
-
-
-async def test_empty_scrape_with_no_saved_products_returns_empty_export(
-    db_session, api_client, monkeypatch
-):
-    competitor = await alpha_competitor(db_session)
-    patch_export_scraper(monkeypatch, [])
-
-    resp = await export(api_client, competitor.id, format="json")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["products_count"] == 0
-    assert body["items"] == []
-
-
-async def test_empty_csv_export_still_has_a_header_row(
-    db_session, api_client, monkeypatch
-):
-    competitor = await alpha_competitor(db_session)
-    patch_export_scraper(monkeypatch, [])
-
-    resp = await export(api_client, competitor.id, format="csv")
-    lines = [line for line in resp.text.split("\r\n") if line]
-    assert len(lines) == 1
-    assert lines[0].startswith("competitor_name,competitor_base_url,collection_url")
-
-
-# ── Saved-data fallback: the provenance risk ──────────────────────────────────
-
-async def test_empty_scrape_silently_falls_back_to_saved_products(
-    db_session, api_client, monkeypatch
-):
-    """
-    PRODUCT RISK, CHARACTERISED (not fixed in Phase 1A).
-
-    The UI calls this a live collection scrape. When the live scrape returns
-    nothing, api/exports.py:60 substitutes previously stored products. The
-    response is byte-for-byte indistinguishable from a successful live export:
-    same status, same headers, same filename, same fields. The owner can act on
-    month-old prices believing they are current.
-
-    Phase 1D must add an explicit provenance contract
-    (live | cached | partial | failed) - see docs/DAILY_CRITICAL_WORKFLOWS.md.
-    """
-    competitor = await alpha_competitor(db_session)
-    await make_product(
-        db_session, competitor, "Stale Batwing", price="99.99",
-        category="Murder Mystery 2",
-        url="https://alpha.example/products/stale-batwing",
-        sku="OLD-1", external_id="999:888",
-    )
+    run = await make_complete_run(db_session, competitor)
+    product = await make_product(db_session, competitor, "Stored Batwing", price="19.99", category="Murder Mystery 2", url="https://alpha.example/products/stored-batwing")
+    product.last_observed_at = OBSERVED_AT
+    product.last_observed_run_id = run.id
     await db_session.commit()
-
-    patch_export_scraper(monkeypatch, [])   # live scrape yields nothing
-
-    resp = await export(api_client, competitor.id, format="json")
-    body = resp.json()
-
-    assert resp.status_code == 200
-    assert body["products_count"] == 1
-    assert body["items"][0]["title"] == "Stale Batwing"
-    assert body["items"][0]["price"] == 99.99
-
-    # Nothing anywhere says this is cached rather than live. Check envelope and
-    # item KEYS (not values - the fixture title deliberately contains "Stale").
-    assert set(body) == {"competitor", "collection_url", "products_count", "items"}
-    item_keys = set(body["items"][0])
-    for provenance_key in ("provenance", "source", "warning", "is_stale", "observed_at"):
-        assert provenance_key not in body, f"envelope unexpectedly has {provenance_key}"
-        assert provenance_key not in item_keys, f"item unexpectedly has {provenance_key}"
-    assert "x-data-provenance" not in {k.lower() for k in resp.headers}
-
-    # The filename and content-type are identical to a live export.
-    assert resp.headers["content-disposition"] == (
-        'attachment; filename="alpha-store-murder-mystery-2-prices.json"'
-    )
-
-    # And scraped_at is stamped with *now*, describing when the export was
-    # generated - not when the price was actually observed.
-    assert body["items"][0]["scraped_at"] is not None
+    response = await export(api_client, competitor.id, mode="cached", format="json", include_provenance=True)
+    body = response.json()
+    assert response.status_code == 200
+    assert body["items"][0]["title"] == "Stored Batwing"
+    assert body["items"][0]["observed_at"] == OBSERVED_AT.isoformat()
+    assert body["items"][0]["observed_run_id"] == run.id
+    assert body["provenance"]["source"] == "cached"
+    assert body["provenance"]["latest_complete_run_id"] == run.id
+    assert body["provenance"]["cached_coverage_basis"]
 
 
-async def test_fallback_only_returns_products_matching_the_collection(
-    db_session, api_client, monkeypatch
-):
-    """The fallback filters saved products by collection alias, so it does not
-    dump the entire catalogue."""
+async def test_cached_legacy_rows_are_honest_and_no_stored_data_is_explicit(db_session, api_client):
     competitor = await alpha_competitor(db_session)
-    await make_product(db_session, competitor, "MM2 Item", price="5.00",
-                       category="Murder Mystery 2",
-                       url="https://alpha.example/products/mm2-item")
-    await make_product(db_session, competitor, "Unrelated Pet", price="6.00",
-                       category="Adopt Me",
-                       url="https://alpha.example/products/unrelated-pet")
+    legacy = await make_product(db_session, competitor, "Legacy Batwing", price="19.99", category="Murder Mystery 2", url="https://alpha.example/products/legacy-batwing")
+    legacy.last_observed_at = None
+    legacy.last_observed_run_id = None
     await db_session.commit()
+    response = await export(api_client, competitor.id, mode="cached", format="json", include_provenance=True)
+    assert response.status_code == 200
+    assert response.json()["provenance"]["coverage_state"] == "unknown"
+    assert response.json()["provenance"]["degraded_or_legacy_row_count"] == 1
 
-    patch_export_scraper(monkeypatch, [])
-
-    body = (await export(api_client, competitor.id, format="json")).json()
-
-    titles = [i["title"] for i in body["items"]]
-    assert titles == ["MM2 Item"]
-
-
-async def test_fallback_excludes_inactive_saved_products(
-    db_session, api_client, monkeypatch
-):
-    competitor = await alpha_competitor(db_session)
-    await make_product(db_session, competitor, "Retired Item", price="5.00",
-                       category="Murder Mystery 2",
-                       url="https://alpha.example/products/retired", active=False)
+    empty = await make_competitor(db_session, "Empty", "https://empty.example", scrape_type="shopify_json")
     await db_session.commit()
-
-    patch_export_scraper(monkeypatch, [])
-
-    body = (await export(api_client, competitor.id, format="json")).json()
-    assert body["items"] == []
-
-
-async def test_successful_scrape_does_not_trigger_fallback(
-    db_session, api_client, monkeypatch
-):
-    """The fallback must only engage on an empty result, never merging stale
-    rows into a good live scrape."""
-    competitor = await alpha_competitor(db_session)
-    await make_product(db_session, competitor, "Stale Batwing", price="99.99",
-                       category="Murder Mystery 2",
-                       url="https://alpha.example/products/stale-batwing")
-    await db_session.commit()
-
-    patch_export_scraper(monkeypatch, shopify_fixture())
-
-    body = (await export(api_client, competitor.id, format="json")).json()
-
-    titles = [i["title"] for i in body["items"]]
-    assert "Stale Batwing" not in titles
-    assert body["products_count"] == 3
-
-
-# ── Scraper failure ───────────────────────────────────────────────────────────
-
-async def test_scraper_exception_is_not_handled_and_returns_500(
-    db_session, api_client, monkeypatch
-):
-    """
-    BUG (documented): api/exports.py has no error handling around the live
-    scrape, so a scraper exception escapes as an unhandled 500 rather than a
-    structured failure. Note this is also the ONLY path where the user learns
-    the scrape failed - an empty result is silently masked by the fallback.
-    """
-    competitor = await alpha_competitor(db_session)
-    patch_export_scraper(monkeypatch, RuntimeError("upstream refused connection"))
-
-    with pytest.raises(RuntimeError, match="upstream refused connection"):
-        await export(api_client, competitor.id)
+    response = await api_client.get("/api/exports/collection-prices", params={"competitor_id": empty.id, "collection_url": "https://empty.example/collections/murder-mystery-2", "mode": "cached"})
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "cached_export_unavailable"

@@ -106,6 +106,32 @@ The TypeScript functions and `MarketSearch.tsx` consume matching explicit types.
 the smallest safe critical-route contract improvement; application-wide OpenAPI type
 generation remains deferred until unrelated untyped routes are modeled.
 
+### 1.3 Phase 1D Collection Export contract
+
+`GET /api/exports/collection-prices` remains a file response, so it has no FastAPI JSON
+`response_model`. Its query contract is `competitor_id`, absolute same-public-host
+`collection_url`, `format=csv|jsonl|json`, `max_pages=1..20`, `mode=live|cached`, and
+`include_provenance=false|true`. `mode=live` is the default and returns only this
+request's acquisition. It does not fall back to stored products. `mode=cached` is the
+only path that reads active stored rows and returns 404 `cached_export_unavailable` when
+none match.
+
+Successful files retain the established defaults: CSV fields/order, JSONL row shape, JSON
+envelope, title sort, media type, and filename. File-level truth is carried in stable
+`X-Market-Monitor-Export-*` headers, including provenance version, requested/actual
+source, completeness, product/page count, cap evidence, safe reason, observation bounds,
+coverage state, and genuine cached run IDs. `scraped_at` remains the file-generation time
+for compatibility, not an observation timestamp.
+
+`include_provenance=true` is an explicit additive extension. It adds `provenance` to the
+JSON envelope and appends `observed_at`, `observed_run_id`, and `coverage_state` to CSV and
+JSONL rows. Live acquisition failures are safe 502 JSON:
+`{"detail":{"code":"live_acquisition_failed","message","provenance"}}`; they never
+expose adapter detail or silently produce a cached file. The frontend uses
+`prepareCollectionExport`, which requests a Blob and parses these headers/failures before
+the user confirms download. `collectionPricesExportUrl` remains exported only for legacy
+external callers and is not used by the Phase 1D page.
+
 ---
 
 ## 2. Known contract defects
