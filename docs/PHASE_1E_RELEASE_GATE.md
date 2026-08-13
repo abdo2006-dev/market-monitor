@@ -3,6 +3,12 @@
 Status as of 2026-08-12. This is an evidence record and operator plan. It does not
 authorize a push, merge, deployment, database write, secret change, or Sync.
 
+Production credential propagation, trusted-TLS classification, the duplicate audit,
+backup/restore evidence, and Storefront-token classification were continued on
+2026-08-13. The authoritative continuation is
+`docs/PHASE_1E_1_RELEASE_UNBLOCK.md`; this file preserves the earlier gate as historical
+evidence.
+
 ## A. Git ancestry — VERIFIED
 
 `v2/export-provenance-ui` is linear from `main` and contains Phase 0 through Phase 1D:

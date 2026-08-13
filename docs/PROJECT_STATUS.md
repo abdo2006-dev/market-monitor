@@ -3,20 +3,20 @@
 **Read this first.** This is the handoff file between working sessions. If it is stale,
 fix it as part of the task.
 
-_Last updated: 2026-08-12, Phase 1E pre-rollout gate complete; production rollout blocked._
+_Last updated: 2026-08-13, Phase 1E.1 production read-only gate complete; rollout blocked._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Phase 1E pre-rollout gate complete locally** — rollout is blocked on credential rotation, production classification/audit, verified backup, GitHub environment/main integration, and separately authorized production steps. |
+| **Current phase** | **Phase 1E.1 read-only production evidence complete** — production is Case B- with duplicates; rollout is blocked on backup/restore proof, duplicate remediation/migrations, production protection/configuration, main integration, and separately authorized writes/Sync. |
 | **Phase 1D base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` (Phase 1C checkpoint) |
 | **Phase 1C base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` |
 | **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
 | **Working branch** | `v2/export-provenance-ui` |
 | **Migration head** | `0005_durable_sync_lifecycle` |
 | **Archive baseline** | `archive/pre-v2-rearchitecture` → `f346f70`; do not move or delete. |
-| **Production** | Configuration metadata and public read-only API metadata inspected. No database query completed, and nothing was migrated, dispatched, deployed, merged, or pushed. |
+| **Production** | Current Vercel credential completed trusted-TLS read-only classification/audits. Schema is B-; 12 logical duplicate groups affect 24 products and 117 history rows. Nothing was migrated, consolidated, dispatched, deployed, merged, pushed, or reconfigured. |
 
 Priority remains: P0 migration safety, P1 Sync, P2 Search, P3 Export, P4 daily-workflow
 UX, then lower-priority features. Treasury Audit remains design-only.
@@ -260,8 +260,9 @@ available gate because ESLint is not installed.
   intentionally independent of Discord delivery.
 - The old scraper remains a multi-platform service; Phase 1B.2 added a contract/telemetry
   boundary without performing the later adapter refactor.
-- Production database classification/migration and real provider proof remain blocked; see
-  `docs/PHASE_1E_RELEASE_GATE.md`.
+- Production classification is **B-** and the duplicate audit is complete. Backup/restore
+  proof, duplicate remediation, migrations, provider configuration, and smoke remain
+  blocked; see `docs/PHASE_1E_1_RELEASE_UNBLOCK.md`.
 - Search suggestions still use an explicit 1,000-candidate cap; broad queries ask the user
   to add a word rather than claiming complete suggestion coverage.
 - The market taxonomy remains hardcoded and duplicated with Export/scraper vocabulary.
@@ -277,11 +278,13 @@ available gate because ESLint is not installed.
 
 ## 9. Next recommended task
 
-Follow `docs/PHASE_1E_RELEASE_GATE.md` in order. First rotate the exposed production
-database credential, establish the schema case with valid TLS trust, run the sanitized
-duplicate audit, and prove backup/restore. Only then review and integrate the cumulative
-branch, configure the default-off `production-sync` environment, and request separate
-authorization for each production write/proof stage. Do not begin Phase 1F or taxonomy
+Follow `docs/PHASE_1E_1_RELEASE_UNBLOCK.md` in order. First prove the configured Neon
+restore window and a disposable restore from a current snapshot/approved backup. Then,
+under separately authorized maintenance, truthfully stamp `0003`, consolidate the 12
+logical duplicate groups while preserving all 117 linked history rows, and upgrade through
+`0004` and `0005`. Only after Case A proof should the cumulative branch be reviewed and
+integrated, `production-sync` configured default-off, the protected V2 deployment made,
+and the one-competitor smoke separately authorized. Do not begin Phase 1F or taxonomy
 cleanup while this gate is blocked.
 
 ## 10. Decisions not to reverse

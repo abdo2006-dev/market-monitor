@@ -92,6 +92,14 @@ use than the one it was issued for, and it is plausibly contrary to the target s
 terms of service. Whether that is acceptable depends on jurisdiction and on your
 relationship with these competitors — it is not a question this document can settle.
 
+**Historical token classification (2026-08-13).** The literal introduced in commit
+`9660f6b` was sent as `X-Shopify-Storefront-Access-Token`, which Shopify defines as the
+public client-side Storefront token header. Private Storefront tokens use the distinct
+`Shopify-Storefront-Private-Token` header. The literal was removed in `8e5f78c`, and
+current source contains no hard-coded Storefront token. It is therefore classified
+**public**, not a leaked private token; repository-history rewriting solely for secrecy is
+not recommended. This classification does not resolve the separate automation/ToS risk.
+
 **Recommendation** Treat this as a decision to make explicitly rather than a default
 behaviour. At minimum: make it opt-in per competitor rather than
 `auto_discover_storefront_graphql: True` by default (`:445`), and tighten the token pattern
