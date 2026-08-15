@@ -68,6 +68,7 @@ export default function CompetitorsPage() {
   if (error) return <div style={{ padding: '2rem' }}><ErrorState message="Failed to load competitors." /></div>
 
   const activeCompetitors = competitors.filter(competitor => competitor.active)
+  const previewDemoMode = import.meta.env.VITE_PREVIEW_DEMO_MODE === 'true'
   const scanControlsDisabled = scanAllMut.isPending || scanningId !== null
   const visibleRequest: SyncRequestStatus | undefined = syncRequest || scanAllMut.data
   const requestHasIssues = visibleRequest?.status === 'failed' || visibleRequest?.status === 'partial'
@@ -95,6 +96,18 @@ export default function CompetitorsPage() {
           </div>
         }
       />
+
+      {previewDemoMode && (
+        <div role="status" style={{
+          marginBottom: 16, padding: '11px 13px', borderRadius: 8,
+          background: '#6366f114', border: '1px solid #6366f155',
+          color: '#c7d2fe', fontSize: 13, lineHeight: 1.5,
+        }}>
+          <strong>Preview Sync is intentionally runner-free.</strong>{' '}
+          Requests are written only to the isolated preview database and remain durable/queued.
+          The existing queued, running, retrying, success, partial, suspicious-empty, and failed rows are deterministic examples and do not advance automatically.
+        </div>
+      )}
 
       {visibleRequest && (
         <div style={{

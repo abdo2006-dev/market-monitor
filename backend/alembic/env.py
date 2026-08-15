@@ -10,9 +10,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models import Base  # noqa: import models
 from app.config import settings
+from app.database import _normalize_database_url
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+database_url, database_connect_args = _normalize_database_url(settings.DATABASE_URL)
+config.set_main_option("sqlalchemy.url", database_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -43,6 +45,7 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=database_connect_args,
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

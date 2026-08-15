@@ -66,13 +66,18 @@ class AcquisitionResult:
 
 async def acquire_catalog(competitor: dict, **scrape_options) -> AcquisitionResult:
     """Run the existing adapters and enrich their output with coverage evidence."""
-    from app.services.scraper import scrape_competitor
-
     started_at = datetime.now(timezone.utc)
     telemetry: dict = {}
-    observations = await scrape_competitor(
-        competitor, telemetry=telemetry, **scrape_options
-    )
+    if _preview_fixture_enabled(competitor):
+        from app.infrastructure.preview_demo import acquire_fixture_catalog
+
+        observations, telemetry = acquire_fixture_catalog(competitor)
+    else:
+        from app.services.scraper import scrape_competitor
+
+        observations = await scrape_competitor(
+            competitor, telemetry=telemetry, **scrape_options
+        )
     completed_at = datetime.now(timezone.utc)
     if not observations and telemetry.get("failure_category"):
         raise AcquisitionFailure(
@@ -122,4 +127,16 @@ async def acquire_catalog(competitor: dict, **scrape_options) -> AcquisitionResu
         completeness=completeness,
         page_cap_reached=page_cap_reached,
         completeness_reason=reason,
+    )
+
+
+def _preview_fixture_enabled(competitor: dict) -> bool:
+    """Require both a preview deployment and an explicitly marked fixture row."""
+    from app.config import settings
+
+    selector_config = competitor.get("selector_config") or {}
+    return (
+        settings.PREVIEW_DEMO_MODE
+        and settings.VERCEL_ENV == "preview"
+        and selector_config.get("preview_demo") is True
     )

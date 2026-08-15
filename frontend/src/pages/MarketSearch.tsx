@@ -34,6 +34,7 @@ import { formatDate, formatPrice } from '../lib/utils'
 import './MarketSearch.css'
 
 const TERMINAL_SYNC_STATES = new Set(['success', 'partial', 'failed'])
+const PREVIEW_DEMO_MODE = import.meta.env.VITE_PREVIEW_DEMO_MODE === 'true'
 
 const COVERAGE_COPY: Record<SearchCoverageState, { label: string; tone: string }> = {
   current_complete: { label: 'Complete coverage', tone: 'good' },
@@ -182,6 +183,14 @@ export default function MarketSearchPage() {
           </Button>
         ) : undefined}
       />
+
+      {PREVIEW_DEMO_MODE && (
+        <div className="preview-demo-notice" role="status">
+          <strong>Preview data is deterministic.</strong>{' '}
+          “Refresh market data” records a durable request in the isolated preview database,
+          but no external Sync runner is connected, so accepted work remains queued.
+        </div>
+      )}
 
       <section className={`search-hero ${selected ? 'search-hero--compact' : ''}`}>
         {!selected && (

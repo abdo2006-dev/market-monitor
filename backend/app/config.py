@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     GITHUB_ACTIONS_WORKFLOW: str = "sync-v2.yml"
     GITHUB_ACTIONS_REF: str = "main"
     CRON_SECRET: Optional[str] = None
+    # Preview-only deterministic acquisition. The second VERCEL_ENV gate makes
+    # this impossible to activate on a Vercel production deployment by setting
+    # PREVIEW_DEMO_MODE alone.
+    VERCEL_ENV: Optional[str] = None
+    PREVIEW_DEMO_MODE: bool = False
     # Startup schema verification (docs/adr/0002). One of: strict | warn | off.
     # "warn" is the deliberate Phase 1A default so that removing the old
     # create_all-at-startup behaviour cannot take a running deployment down on

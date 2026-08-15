@@ -1,4 +1,6 @@
 .exports-page { max-width: 1180px; margin: 0 auto; padding: 2rem; color: #e4e4f0; }
+.exports-preview-notice { margin: 0 0 16px; padding: 11px 13px; border: 1px solid #6366f155; border-radius: 9px; background: #6366f114; color: #c7d2fe; font-size: 13px; line-height: 1.5; }
+.exports-preview-notice strong { color: #e0e7ff; }
 .exports-layout { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(260px, .75fr); gap: 18px; align-items: start; }
 .exports-form-card { min-width: 0; }
 .exports-source { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0 0 20px; padding: 0; border: 0; }

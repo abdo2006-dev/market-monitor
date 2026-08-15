@@ -116,6 +116,15 @@ def test_migration_head_is_single():
     assert _migration_head() is not None
 
 
+def test_alembic_reuses_application_database_url_and_tls_normalization():
+    """Marketplace PostgreSQL URLs must migrate with asyncpg and verified TLS."""
+    from pathlib import Path
+
+    source = (Path(__file__).parents[2] / "alembic" / "env.py").read_text()
+    assert "_normalize_database_url(settings.DATABASE_URL)" in source
+    assert "connect_args=database_connect_args" in source
+
+
 def test_schema_check_modes_are_known():
     from app.config import settings
 

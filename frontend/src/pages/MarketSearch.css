@@ -15,6 +15,18 @@
   color: var(--search-text);
 }
 
+.preview-demo-notice {
+  margin: 0 0 16px;
+  padding: 11px 13px;
+  border: 1px solid #6366f155;
+  border-radius: 9px;
+  background: #6366f114;
+  color: #c7d2fe;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.preview-demo-notice strong { color: #e0e7ff; }
+
 .button-content,
 .search-kicker,
 .empty-principles span,

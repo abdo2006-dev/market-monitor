@@ -89,6 +89,15 @@ export default function ExportsPage() {
     () => competitors.find((item: Competitor) => String(item.id) === competitorId),
     [competitors, competitorId],
   )
+  const previewDemoMode = import.meta.env.VITE_PREVIEW_DEMO_MODE === 'true'
+
+  const chooseCompetitor = (value: string) => {
+    setCompetitorId(value)
+    const competitor = competitors.find((item: Competitor) => String(item.id) === value)
+    const demoUrl = competitor?.selector_config?.preview_collection_url
+    if (previewDemoMode && typeof demoUrl === 'string') setCollectionUrl(demoUrl)
+    resetPrepared()
+  }
 
   const resetPrepared = () => {
     setPrepared(null)
@@ -151,6 +160,13 @@ export default function ExportsPage() {
         subtitle="Prepare a truthful collection download without changing your saved market data."
       />
 
+      {previewDemoMode && (
+        <div className="exports-preview-notice" role="status">
+          <strong>Safe preview data.</strong> “Live” uses a deterministic backend fixture in this deployment;
+          it does not contact a storefront or update saved products. Choosing a demo competitor fills its test URL.
+        </div>
+      )}
+
       <div className="exports-layout">
         <Card className="exports-form-card">
           <fieldset className="exports-source" disabled={state === 'preparing'}>
@@ -166,7 +182,7 @@ export default function ExportsPage() {
           </fieldset>
 
           <div className="exports-grid exports-grid-top">
-            <Select id="export-competitor" label="Competitor" value={competitorId} onChange={e => { setCompetitorId(e.target.value); resetPrepared() }} disabled={state === 'preparing'}>
+            <Select id="export-competitor" label="Competitor" value={competitorId} onChange={e => chooseCompetitor(e.target.value)} disabled={state === 'preparing'}>
               <option value="">Choose competitor</option>
               {competitors.map((competitor: Competitor) => (
                 <option key={competitor.id} value={competitor.id}>{competitor.name}</option>
