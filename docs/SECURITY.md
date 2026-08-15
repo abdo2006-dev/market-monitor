@@ -155,6 +155,16 @@ harmless, but it gives a false impression that something is being signed.
 - `.vercel/` is correctly ignored and untracked.
 - No database dumps, browser profiles, or credentials found anywhere in the tree.
 
+### 1.11 V2 user-test Preview fixture — **isolated and default-off**
+
+The user-testing Preview uses a separate Neon project and Vercel Deployment Protection.
+Deterministic acquisition is enabled only when `PREVIEW_DEMO_MODE=true`, Vercel's reserved
+`VERCEL_ENV` is exactly `preview`, and the selected competitor row carries
+`selector_config.preview_demo=true`. Production cannot activate the adapter by setting the
+feature flag alone. Fixture hosts use the reserved `.invalid` suffix, notifications and
+automatic Sync are disabled, and no Preview worker is connected. See
+`docs/PREVIEW_TESTING.md` for the complete isolation evidence and test data.
+
 ---
 
 ## 2. Data handled

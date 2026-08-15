@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CompareResponse, SearchSuggestion, SearchSuggestionsResponse } from '../lib/types'
-import MarketSearchPage from './MarketSearch'
+import MarketSearchPage, { priceDifferenceLabel } from './MarketSearch'
 import {
   compareProduct,
   getSearchSuggestions,
@@ -24,6 +24,11 @@ const mockedSuggestions = vi.mocked(getSearchSuggestions)
 const mockedCompare = vi.mocked(compareProduct)
 const mockedSyncRequest = vi.mocked(getSyncRequest)
 const mockedScanAll = vi.mocked(scanAllCompetitors)
+
+it('labels prices below the reliable low without a contradictory plus sign', () => {
+  expect(priceDifferenceLabel(-24.99, 'USD')).toBe('$24.99 below reliable low')
+  expect(priceDifferenceLabel(4.01, 'USD')).toBe('$4.01 above reliable low')
+})
 
 const suggestion: SearchSuggestion = {
   title: 'Batwing',

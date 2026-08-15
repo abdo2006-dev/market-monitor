@@ -1,0 +1,24 @@
+.competitors-page {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+  padding: 2rem;
+}
+
+.competitors-page .card {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.competitors-page table { min-width: 900px; }
+
+@media (max-width: 760px) {
+  body:has(.competitors-page) aside { display: none !important; }
+  body:has(.competitors-page) main {
+    width: 100%;
+    min-width: 0;
+    margin-left: 0 !important;
+  }
+  .competitors-page { padding: 1.1rem; }
+}

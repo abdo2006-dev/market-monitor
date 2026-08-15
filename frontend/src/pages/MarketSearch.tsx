@@ -63,6 +63,11 @@ function readableAge(seconds: number | null) {
   return `${days} day${days === 1 ? '' : 's'} ago`
 }
 
+export function priceDifferenceLabel(difference: number, currency: string) {
+  if (difference < 0) return `${formatPrice(Math.abs(difference), currency)} below reliable low`
+  return `${formatPrice(difference, currency)} above reliable low`
+}
+
 function errorMessage(error: unknown) {
   if (error && typeof error === 'object' && 'message' in error) return String(error.message)
   return 'Something went wrong while loading market data.'
@@ -455,7 +460,7 @@ function CompetitorResult({ row, onOpenProduct }: { row: CompareRow; onOpenProdu
             {row.trust.reliable && difference === 0 ? (
               <span className="price-reference price-reference--best"><ShieldCheck size={13} /> Reliable low</span>
             ) : difference != null ? (
-              <span className="price-reference">+{formatPrice(difference, product.currency)} vs reliable low</span>
+              <span className="price-reference">{priceDifferenceLabel(difference, product.currency)}</span>
             ) : (
               <span className="price-reference">Observed price only</span>
             )}

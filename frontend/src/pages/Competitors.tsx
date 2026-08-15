@@ -6,6 +6,7 @@ import { PageHeader } from '../components/layout/Sidebar'
 import { timeAgo } from '../lib/utils'
 import CompetitorForm from '../components/CompetitorForm'
 import type { Competitor, CompetitorInput, SyncRequestStatus } from '../lib/types'
+import './Competitors.css'
 
 export default function CompetitorsPage() {
   const qc = useQueryClient()
@@ -78,7 +79,7 @@ export default function CompetitorsPage() {
   )
 
   return (
-    <div style={{ padding: '2rem' }}>
+    <div className="competitors-page">
       <PageHeader
         title="Competitors"
         subtitle={`${competitors.length} competitor${competitors.length !== 1 ? 's' : ''} configured`}
@@ -142,6 +143,15 @@ export default function CompetitorsPage() {
               const run = requestRunsByCompetitor.get(c.id) || fresh?.active_run
               const runStatus = run?.status === 'retry_wait' ? 'retrying' : run?.status
               const isPartial = run?.completeness === 'partial' || run?.completeness === 'suspicious_empty'
+              const latestRunStatus = runStatus || c.last_scan_status || (fresh?.coverage_complete ? 'complete' : 'no complete coverage')
+              const latestRunHasIssues = ['failed', 'partial', 'suspicious_empty', 'retrying'].includes(latestRunStatus)
+              const terminalExplanation = !run && c.last_scan_status === 'failed'
+                ? 'Latest Sync attempt failed; stored coverage remains unchanged.'
+                : !run && c.last_scan_status === 'suspicious_empty'
+                  ? 'Unexpected zero-product result; stored coverage remains unchanged.'
+                  : !run && c.last_scan_status === 'partial'
+                    ? 'Latest catalog coverage was partial; absence inference was disabled.'
+                    : null
               return (
               <Tr key={c.id}>
                 <Td>
@@ -158,8 +168,8 @@ export default function CompetitorsPage() {
                       {c.active ? 'Active' : 'Inactive'}
                     </span>
                     {(runStatus || c.last_scan_status) && (
-                      <span style={{ fontSize: 11, background: (runStatus === 'failed' || isPartial) ? '#ef444422' : '#6366f122', color: (runStatus === 'failed' || isPartial) ? '#fca5a5' : '#a5b4fc', padding: '2px 6px', borderRadius: 4 }}>
-                        {isPartial ? run?.completeness.replace('_', ' ') : (runStatus || c.last_scan_status)}
+                      <span style={{ fontSize: 11, background: latestRunHasIssues ? '#ef444422' : '#6366f122', color: latestRunHasIssues ? '#fca5a5' : '#a5b4fc', padding: '2px 6px', borderRadius: 4 }}>
+                        {(isPartial ? run?.completeness : (runStatus || c.last_scan_status))?.replace('_', ' ')}
                       </span>
                     )}
                   </div>
@@ -168,7 +178,8 @@ export default function CompetitorsPage() {
                   {fresh?.last_complete_at ? timeAgo(fresh.last_complete_at) : 'Never'}
                 </Td>
                 <Td>
-                  <div style={{ fontSize: 12, color: '#c7d2fe' }}>{runStatus || (fresh?.coverage_complete ? 'complete' : 'no complete coverage')}</div>
+                  <div style={{ fontSize: 12, color: '#c7d2fe' }}>{latestRunStatus.replace('_', ' ')}</div>
+                  {terminalExplanation && <div style={{ fontSize: 11, color: '#fca5a5', maxWidth: 220 }}>{terminalExplanation}</div>}
                   {run?.failure_reason && <div style={{ fontSize: 11, color: '#fca5a5', maxWidth: 220 }}>{run.failure_reason}</div>}
                   {run?.completeness_reason && isPartial && <div style={{ fontSize: 11, color: '#fca5a5', maxWidth: 220 }}>{run.completeness_reason}</div>}
                 </Td>

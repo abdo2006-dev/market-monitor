@@ -3,23 +3,28 @@
 **Read this first.** This is the handoff file between working sessions. If it is stale,
 fix it as part of the task.
 
-_Last updated: 2026-08-13, Phase 1E.1 production read-only gate complete; rollout blocked._
+_Last updated: 2026-08-15, isolated V2 user-testing Preview ready; Production rollout remains blocked._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Phase 1E.1 read-only production evidence complete** — production is Case B- with duplicates; rollout is blocked on backup/restore proof, duplicate remediation/migrations, production protection/configuration, main integration, and separately authorized writes/Sync. |
+| **Current phase** | **Safe V2 user-testing Preview ready** — the cumulative V2 build is deployed against a separate seeded Neon project. Production remains Case B- with duplicates and its rollout blockers are unchanged. |
 | **Phase 1D base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` (Phase 1C checkpoint) |
 | **Phase 1C base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` |
 | **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
-| **Working branch** | `v2/export-provenance-ui` |
+| **Working branch** | `preview/market-monitor-v2` |
 | **Migration head** | `0005_durable_sync_lifecycle` |
 | **Archive baseline** | `archive/pre-v2-rearchitecture` → `f346f70`; do not move or delete. |
 | **Production** | Current Vercel credential completed trusted-TLS read-only classification/audits. Schema is B-; 12 logical duplicate groups affect 24 products and 117 history rows. Nothing was migrated, consolidated, dispatched, deployed, merged, pushed, or reconfigured. |
+| **User-test Preview** | Vercel Preview is Ready on `preview/market-monitor-v2`, backed by isolated resource `market-monitor-v2-preview-db` at migration head with seven deterministic competitors and no runner. See `docs/PREVIEW_TESTING.md`. |
 
 Priority remains: P0 migration safety, P1 Sync, P2 Search, P3 Export, P4 daily-workflow
 UX, then lower-priority features. Treasury Audit remains design-only.
+
+The owner's immediate next step is hands-on testing through the protected Preview URL in
+`docs/PREVIEW_TESTING.md`. Preview feedback may justify focused UI corrections; it does not
+authorize Phase 1F or any Production rollout write.
 
 ## 2. Phase 1C outcome
 
