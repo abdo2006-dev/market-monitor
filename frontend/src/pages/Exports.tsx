@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { Archive, CheckCircle2, Download, FileText, Radio, ShieldCheck, TriangleAlert } from 'lucide-react'
 import { PageHeader } from '../components/layout/Sidebar'
 import { Button, Card, ErrorState, Input, Loading, Select } from '../components/ui'
 import { getCompetitors, prepareCollectionExport } from '../lib/api'
@@ -156,28 +157,39 @@ export default function ExportsPage() {
   return (
     <div className="exports-page">
       <PageHeader
+        eyebrow="Collection delivery"
         title="Collection exports"
-        subtitle="Prepare a truthful collection download without changing your saved market data."
+        subtitle="Choose the evidence source, prepare it, inspect its provenance, then download."
       />
 
       {previewDemoMode && (
         <div className="exports-preview-notice" role="status">
-          <strong>Safe preview data.</strong> “Live” uses a deterministic backend fixture in this deployment;
-          it does not contact a storefront or update saved products. Choosing a demo competitor fills its test URL.
+          <ShieldCheck size={16} aria-hidden="true" />
+          <span><strong>Protected preview.</strong> Live uses a deterministic fixture and never contacts a storefront or updates saved products.</span>
         </div>
       )}
 
+      <ol className="exports-steps" aria-label="Export workflow">
+        <li className="is-current"><span>1</span><div><strong>Choose source</strong><small>Live or stored</small></div></li>
+        <li className={competitorId && collectionUrl ? 'is-current' : ''}><span>2</span><div><strong>Set collection</strong><small>Competitor and format</small></div></li>
+        <li className={state === 'preparing' || state === 'ready' || state === 'failed' ? 'is-current' : ''}><span>3</span><div><strong>Verify outcome</strong><small>Coverage and provenance</small></div></li>
+        <li className={state === 'ready' ? 'is-current' : ''}><span>4</span><div><strong>Download</strong><small>Prepared bytes only</small></div></li>
+      </ol>
+
       <div className="exports-layout">
         <Card className="exports-form-card">
+          <div className="exports-section-heading"><span className="exports-section-icon"><FileText size={17} /></span><div><span>Export request</span><h2>Prepare collection data</h2></div></div>
           <fieldset className="exports-source" disabled={state === 'preparing'}>
-            <legend>Export source</legend>
+            <legend>Where should the data come from?</legend>
             <label className={`exports-mode ${mode === 'live' ? 'selected' : ''}`}>
               <input type="radio" name="export-mode" value="live" checked={mode === 'live'} onChange={() => { setMode('live'); resetPrepared() }} />
-              <span><strong>Live current collection</strong><small>Acquire this collection now. A failed or empty result never becomes stored data.</small></span>
+              <Radio size={18} aria-hidden="true" />
+              <span><strong>Live current collection</strong><small>Acquire now. A failed or empty response never becomes stored data.</small></span>
             </label>
             <label className={`exports-mode ${mode === 'cached' ? 'selected' : ''}`}>
               <input type="radio" name="export-mode" value="cached" checked={mode === 'cached'} onChange={() => { setMode('cached'); resetPrepared() }} />
-              <span><strong>Latest stored data</strong><small>Use active stored rows intentionally. Their observation ages and coverage are disclosed.</small></span>
+              <Archive size={18} aria-hidden="true" />
+              <span><strong>Latest stored data</strong><small>Use saved observations intentionally, with ages and coverage disclosed.</small></span>
             </label>
           </fieldset>
 
@@ -219,24 +231,26 @@ export default function ExportsPage() {
           {selectedCompetitor && <p className="exports-site">Selected site: <strong>{selectedCompetitor.base_url}</strong></p>}
 
           <div className="exports-actions">
-            <Button onClick={() => prepare()} disabled={state === 'preparing'}>
-              {state === 'preparing' ? 'Acquiring collection…' : 'Prepare export'}
+            <Button onClick={() => prepare()} loading={state === 'preparing'} disabled={state === 'preparing'}>
+              {state === 'preparing' ? 'Acquiring collection…' : <><FileText size={15} /> Prepare export</>}
             </Button>
             <span className="exports-format-help">JSONL suits LLM workflows; CSV suits spreadsheets.</span>
           </div>
         </Card>
 
-        <aside className="exports-trust-card" aria-live="polite">
+        <aside className={`exports-trust-card exports-trust-card--${state}`} aria-live="polite">
           {state === 'idle' && (
-            <><h2>What happens next</h2><p>{mode === 'live'
+            <><span className="exports-outcome-icon"><ShieldCheck size={20} /></span><span className="exports-outcome-kicker">Outcome preview</span><h2>What happens next</h2><p>{mode === 'live'
               ? 'The collection is acquired now and checked for complete, partial, or suspicious-empty coverage.'
               : 'Only active stored rows matching this collection are prepared. No live request is made.'}</p></>
           )}
           {state === 'preparing' && (
-            <><h2>Preparing export</h2><p>Acquiring and serializing your {mode === 'live' ? 'live collection' : 'stored collection'} data. This can take a few seconds.</p></>
+            <><span className="exports-outcome-icon is-loading"><span className="ui-spinner" /></span><span className="exports-outcome-kicker">Working</span><h2>Preparing export</h2><p>Acquiring and serializing your {mode === 'live' ? 'live collection' : 'stored collection'} data. This can take a few seconds.</p><div className="exports-mini-skeleton"><span /><span /><span /></div></>
           )}
           {state === 'failed' && (
             <>
+              <span className="exports-outcome-icon is-danger"><TriangleAlert size={20} /></span>
+              <span className="exports-outcome-kicker">Safe failure</span>
               <h2>Live acquisition failed</h2>
               <p>{error}</p>
               {failure?.provenance.safe_reason && <p className="exports-muted">Reason: {failure.provenance.safe_reason}</p>}
@@ -248,6 +262,9 @@ export default function ExportsPage() {
           )}
           {prepared && provenance && (
             <>
+              <span className={`exports-outcome-icon is-${provenance.completeness === 'complete' ? 'success' : 'warning'}`}>
+                {provenance.completeness === 'complete' ? <CheckCircle2 size={20} /> : <TriangleAlert size={20} />}
+              </span>
               <div className={`exports-status ${provenance.completeness}`}>
                 <span>{provenance.source === 'live' ? 'LIVE' : 'STORED'}</span>
                 <strong>{completenessLabel(provenance.completeness)}</strong>
@@ -260,7 +277,7 @@ export default function ExportsPage() {
               {provenance.page_cap_reached && <p className="exports-warning">Page limit reached — unobserved products may exist.</p>}
               {provenance.source === 'cached' && <p className="exports-muted">{provenance.degraded_or_legacy_row_count} row(s) are not directly linked to the latest complete catalog.</p>}
               <Button onClick={() => downloadPreparedFile(prepared)}>
-                Download {provenance.completeness === 'partial' ? 'partial ' : ''}{format.toUpperCase()} export
+                <Download size={15} /> Download {provenance.completeness === 'partial' ? 'partial ' : ''}{format.toUpperCase()} export
               </Button>
             </>
           )}

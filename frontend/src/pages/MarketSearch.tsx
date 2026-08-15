@@ -172,8 +172,9 @@ export default function MarketSearchPage() {
   return (
     <div className="market-search-page">
       <PageHeader
-        title="Market Search"
-        subtitle="Compare the market with observation age and catalog coverage in view."
+        eyebrow="Daily pricing"
+        title="Market search"
+        subtitle="Find the price you can trust, with every older or degraded observation still visible."
         action={selected ? (
           <Button
             variant="secondary"
@@ -191,19 +192,18 @@ export default function MarketSearchPage() {
 
       {PREVIEW_DEMO_MODE && (
         <div className="preview-demo-notice" role="status">
-          <strong>Preview data is deterministic.</strong>{' '}
-          “Refresh market data” records a durable request in the isolated preview database,
-          but no external Sync runner is connected, so accepted work remains queued.
+          <ShieldCheck size={16} aria-hidden="true" />
+          <span><strong>Protected preview.</strong> Deterministic market evidence only. Refresh requests are durable but stay queued because no external Sync runner is connected.</span>
         </div>
       )}
 
       <section className={`search-hero ${selected ? 'search-hero--compact' : ''}`}>
         {!selected && (
-          <div className="search-kicker"><Sparkles size={14} /> Market intelligence</div>
+          <div className="search-kicker"><Sparkles size={14} /> Product comparison</div>
         )}
         <div className="search-copy">
-          <h2>{selected ? 'Compare another product' : 'What are you pricing today?'}</h2>
-          {!selected && <p>Find the logical item once, then see every competitor with its evidence attached.</p>}
+          <h2>{selected ? 'Compare another product' : 'Search the market'}</h2>
+          {!selected && <p>Enter an item name to compare current prices, freshness, stock, and degraded evidence in one view.</p>}
         </div>
         <div className="search-box" role="search">
           <Search size={20} aria-hidden="true" />
@@ -341,6 +341,8 @@ function ResultsView({
   noReliable: boolean
   onOpenProduct: (id: number) => void
 }) {
+  const reliableRows = rows.filter(row => row.trust.reliable)
+  const degradedRows = rows.filter(row => !row.trust.reliable)
   return (
     <div className="results-stack">
       <section className="result-heading">
@@ -375,14 +377,21 @@ function ResultsView({
 
       <section className="competitor-section">
         <div className="section-heading">
-          <div><span className="eyebrow">Competitor comparison</span><h3>Every listing, with its evidence</h3></div>
+          <div><span className="eyebrow">Competitor comparison</span><h3>Price evidence by seller</h3></div>
           <span>{rows.length} active competitor{rows.length === 1 ? '' : 's'}</span>
         </div>
-        <div className="competitor-list">
-          {rows.map(row => (
-            <CompetitorResult key={row.competitor_id} row={row} onOpenProduct={onOpenProduct} />
-          ))}
-        </div>
+        {reliableRows.length > 0 && (
+          <div className="result-group">
+            <div className="result-group-heading"><span className="result-group-dot is-good" /><strong>Current and trustworthy</strong><small>{reliableRows.length} qualifying price{reliableRows.length === 1 ? '' : 's'}</small></div>
+            <div className="competitor-list">{reliableRows.map(row => <CompetitorResult key={row.competitor_id} row={row} onOpenProduct={onOpenProduct} />)}</div>
+          </div>
+        )}
+        {degradedRows.length > 0 && (
+          <div className="result-group result-group--degraded">
+            <div className="result-group-heading"><span className="result-group-dot" /><strong>Older or degraded evidence</strong><small>Visible, excluded from the reliable range</small></div>
+            <div className="competitor-list">{degradedRows.map(row => <CompetitorResult key={row.competitor_id} row={row} onOpenProduct={onOpenProduct} />)}</div>
+          </div>
+        )}
       </section>
     </div>
   )

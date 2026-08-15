@@ -65,9 +65,17 @@ out of stock), so the UI demonstrates why observed-low and reliable-low differ.
 4. Choose **Preview Gamma — failed** and prepare Live. Confirm the safe failure panel and
    that stored data is offered only as a separate explicit action. Choose **Preview Delta
    — suspicious empty** to inspect the zero-product warning.
-5. Open **Competitors**. Inspect queued, running, retrying, success, partial,
-   suspicious-empty, failed, and legacy states. Press Scan on Zeta if desired: the response
-   is accepted/queued with dispatcher `not requested`; it never claims completion.
+5. Open **Competitors**. Confirm the readiness summary and inspect queued, running, retrying,
+   success, partial, suspicious-empty, failed, and legacy states. Press Sync on Zeta if
+   desired: the response is accepted/queued with dispatcher `not requested`; it never claims
+   completion. Confirm destructive actions remain secondary in each row's action menu.
+6. Repeat Search, Exports, and Competitors at a normal desktop width. Confirm the primary
+   action and evidence hierarchy are clear and the page never scrolls horizontally.
+7. Repeat all three workflows on a phone-sized viewport. Confirm the bottom workflow
+   navigation, More drawer, menus, controls, and evidence remain usable without clipping.
+
+Record the verdict in this order: **Search → Exports → Competitors/Sync → desktop → mobile**.
+This is an owner-testing gate, not authorization to merge, migrate, or enable Production.
 
 ## Verification evidence
 
@@ -79,13 +87,17 @@ out of stock), so the UI demonstrates why observed-low and reliable-low differ.
 - Deployed Sync smoke: one manual request returned `status=queued`,
   `dispatch_status=not_requested`, `completeness=unknown`, and zero observed products.
 - Browser checks: autocomplete keyboard selection, comparison cards, price-change context,
-  Export partial/failure panels, Sync lifecycle table, desktop width, 390px Search/Export/
-  Competitors width, and no console errors.
-- Frontend: 17 tests, typecheck, and production build pass.
-- Preview/acquisition/release unit selection: 10 tests pass.
+  Export complete/partial/suspicious-empty/failure/stored panels, Sync lifecycle operations
+  center, More-drawer keyboard dismissal, 1440/1280/1024/961/959/768/390 px widths, no
+  horizontal document overflow, and no console errors.
+- Frontend: 19 tests, typecheck, and production build pass. The shell and routes are lazy
+  loaded; the prior 711.25 kB monolithic JavaScript bundle is replaced by a 209.08 kB shared
+  entry plus route chunks (largest lazy route 388.72 kB).
+- Full backend: 221 tests pass against a separate disposable local PostgreSQL database.
+- Critical backend: 143 tests pass. Search: 39. Export/shared policy: 28. Product integrity/
+  concurrency: 37. Preview/security release gate: 9.
+- Fresh migration round-trip reached `0005_durable_sync_lifecycle`; `alembic check` reports
+  no new upgrade operations. Strict application startup passes with 36 routes.
 
-The full database suite was attempted against a separate disposable database inside the
-preview Neon project, but the remote run exceeded this execution environment's 30-second
-command window before producing a terminal pytest summary. It is not reported as a pass.
-The deployed migrated schema and all three daily workflows were instead exercised directly
-against the isolated preview database as listed above.
+No live storefront or Production database participated in these checks. The disposable
+local database is separate from both Preview Neon and Production.

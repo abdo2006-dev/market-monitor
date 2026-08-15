@@ -3,10 +3,11 @@
 This file is the canonical operating manual for Claude, Codex, and any other coding agent
 working in this repository. Read it fully before making substantial changes.
 
-The project is currently at **V2 Phase 1C Search complete → Phase 1D Export**. Phase 0 produced an audit and target
-architecture; Phase 1A made migrations safe; Phase 1B.1 enforced product identity and
-concurrent reconciliation safety; Phase 1B.2 added the durable Sync request/claim/lease/
-completeness lifecycle and its production rollout gate. Read
+The project is currently at the **protected V2 Preview and owner-testing gate**. Phase 0
+produced an audit and target architecture; Phase 1A made migrations safe; Phase 1B.1
+enforced product identity and concurrent reconciliation safety; Phase 1B.2 added the
+durable Sync lifecycle; Phase 1C completed trustworthy Search; Phase 1D completed truthful
+Exports; and the protected Preview now carries the shared UI system. Read
 `docs/PROJECT_STATUS.md` first — it tells you where the work actually stands today.
 
 ---
@@ -96,6 +97,9 @@ Rules:
 - **External integrations go behind adapters.** New scraping platforms, notification
   channels, and blockchain providers are adapters implementing a documented interface,
   not new branches inside an existing function.
+- **Substantial UI work follows `docs/UI_UX_SYSTEM.md`.** Reuse its tokens, shell,
+  status language, responsive strategy, loading/error patterns, and daily-workflow
+  composition. Do not add page-specific shell hacks or a second visual system.
 
 ---
 

@@ -1,86 +1,139 @@
-import React from 'react'
-import { NavLink } from 'react-router-dom'
+import React, { useEffect, useState } from 'react'
+import { NavLink, useLocation } from 'react-router-dom'
+import {
+  Activity,
+  BarChart3,
+  Boxes,
+  Building2,
+  Download,
+  LayoutDashboard,
+  Menu,
+  Radar,
+  Search,
+  Settings,
+  X,
+} from 'lucide-react'
 
-const NAV = [
-  { to: '/', label: 'Dashboard', icon: '🏠' },
-  { to: '/competitors', label: 'Competitors', icon: '🏢' },
-  { to: '/products', label: 'Products', icon: '📦' },
-  { to: '/search', label: 'Market Search', icon: '🔍' },
-  { to: '/sales', label: 'Sales Signals', icon: '📈' },
-  { to: '/exports', label: 'Exports', icon: '⬇️' },
-  { to: '/activity', label: 'Activity', icon: '📋' },
-  { to: '/settings', label: 'Settings', icon: '⚙️' },
+const MARKET_NAV = [
+  { to: '/search', label: 'Search', icon: Search },
+  { to: '/competitors', label: 'Competitors', icon: Building2 },
+  { to: '/exports', label: 'Exports', icon: Download },
 ]
 
-export default function Layout({ children }: { children: React.ReactNode }) {
+const SYSTEM_NAV = [
+  { to: '/', label: 'Overview', icon: LayoutDashboard },
+  { to: '/products', label: 'Products', icon: Boxes },
+  { to: '/sales', label: 'Sales signals', icon: BarChart3 },
+  { to: '/activity', label: 'Activity', icon: Activity },
+  { to: '/settings', label: 'Settings', icon: Settings },
+]
+
+function AppNav({ onNavigate }: { onNavigate?: () => void }) {
   return (
-    <div style={{ display: 'flex', minHeight: '100vh' }}>
-      {/* Sidebar */}
-      <aside style={{
-        width: 220, background: '#13162a', borderRight: '1px solid #2d3048',
-        display: 'flex', flexDirection: 'column', position: 'fixed', top: 0, left: 0, bottom: 0, zIndex: 100,
-      }}>
-        {/* Logo */}
-        <div style={{ padding: '1.5rem 1.25rem', borderBottom: '1px solid #2d3048' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div style={{ fontSize: 22 }}>📡</div>
-            <div>
-              <div style={{ fontWeight: 800, fontSize: 15, color: '#e4e4f0', letterSpacing: -0.3 }}>Market</div>
-              <div style={{ fontWeight: 800, fontSize: 15, color: '#6366f1', letterSpacing: -0.3 }}>Monitor</div>
-            </div>
-          </div>
-        </div>
+    <nav className="app-nav" aria-label="Primary navigation">
+      <div className="nav-group">
+        <span className="nav-group-label">Market</span>
+        {MARKET_NAV.map(({ to, label, icon: Icon }) => (
+          <NavLink key={to} to={to} onClick={onNavigate} className={({ isActive }) => `nav-link ${isActive ? 'is-active' : ''}`}>
+            <Icon size={18} aria-hidden="true" /><span>{label}</span>
+          </NavLink>
+        ))}
+      </div>
+      <div className="nav-group nav-group--system">
+        <span className="nav-group-label">Workspace</span>
+        {SYSTEM_NAV.map(({ to, label, icon: Icon }) => (
+          <NavLink key={to} to={to} end={to === '/'} onClick={onNavigate} className={({ isActive }) => `nav-link ${isActive ? 'is-active' : ''}`}>
+            <Icon size={18} aria-hidden="true" /><span>{label}</span>
+          </NavLink>
+        ))}
+      </div>
+    </nav>
+  )
+}
 
-        {/* Navigation */}
-        <nav style={{ flex: 1, padding: '0.75rem 0.5rem' }}>
-          {NAV.map(item => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === '/'}
-              style={({ isActive }) => ({
-                display: 'flex', alignItems: 'center', gap: 10,
-                padding: '9px 14px', borderRadius: 8, marginBottom: 2,
-                textDecoration: 'none', fontSize: 14, fontWeight: 500,
-                transition: 'all 0.15s',
-                background: isActive ? '#6366f122' : 'transparent',
-                color: isActive ? '#6366f1' : '#8b8fa8',
-                borderLeft: isActive ? '3px solid #6366f1' : '3px solid transparent',
-              })}
-            >
-              <span style={{ fontSize: 16 }}>{item.icon}</span>
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
+function Brand() {
+  return (
+    <NavLink to="/search" className="app-brand" aria-label="Market Monitor Search">
+      <span className="brand-mark"><Radar size={21} aria-hidden="true" /></span>
+      <span><strong>Market Monitor</strong><small>Market intelligence</small></span>
+    </NavLink>
+  )
+}
 
-        {/* Footer */}
-        <div style={{ padding: '1rem 1.25rem', borderTop: '1px solid #2d3048', color: '#3d3f5a', fontSize: 11 }}>
-          Market Monitor v1.0
+export default function Layout({ children }: { children: React.ReactNode }) {
+  const [mobileOpen, setMobileOpen] = useState(false)
+  const location = useLocation()
+  const preview = import.meta.env.VITE_PREVIEW_DEMO_MODE === 'true'
+
+  useEffect(() => setMobileOpen(false), [location.pathname])
+  useEffect(() => {
+    if (!mobileOpen) return
+    const previousOverflow = document.body.style.overflow
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileOpen(false)
+    }
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [mobileOpen])
+
+  return (
+    <div className="app-shell">
+      <aside className="desktop-sidebar">
+        <Brand />
+        <AppNav />
+        <div className="sidebar-foot">
+          <span className={`environment-dot ${preview ? 'is-preview' : ''}`} />
+          <span><strong>{preview ? 'Protected preview' : 'Market workspace'}</strong><small>{preview ? 'Isolated test data' : 'Daily operations'}</small></span>
         </div>
       </aside>
 
-      {/* Main content */}
-      <main style={{ marginLeft: 220, flex: 1, minHeight: '100vh', background: '#0f1117' }}>
-        {children}
-      </main>
+      <header className="mobile-header">
+        <Brand />
+        <button type="button" className="icon-button" onClick={() => setMobileOpen(open => !open)} aria-expanded={mobileOpen} aria-controls="mobile-navigation" aria-label={mobileOpen ? 'Close navigation' : 'Open navigation'}>
+          {mobileOpen ? <X size={21} /> : <Menu size={21} />}
+        </button>
+      </header>
+
+      {mobileOpen && (
+        <div className="mobile-drawer-backdrop" onClick={() => setMobileOpen(false)}>
+          <aside id="mobile-navigation" className="mobile-drawer" role="dialog" aria-modal="true" aria-label="Application navigation" onClick={event => event.stopPropagation()}>
+            <div className="mobile-drawer-head"><span>Navigate</span><button type="button" className="icon-button" onClick={() => setMobileOpen(false)} aria-label="Close navigation"><X size={20} /></button></div>
+            <AppNav onNavigate={() => setMobileOpen(false)} />
+          </aside>
+        </div>
+      )}
+
+      <main className="app-main">{children}</main>
+
+      <nav className="mobile-tabbar" aria-label="Daily workflows">
+        {MARKET_NAV.map(({ to, label, icon: Icon }) => (
+          <NavLink key={to} to={to} className={({ isActive }) => `mobile-tab ${isActive ? 'is-active' : ''}`}>
+            <Icon size={19} aria-hidden="true" /><span>{label}</span>
+          </NavLink>
+        ))}
+        <button type="button" className={`mobile-tab ${mobileOpen ? 'is-active' : ''}`} onClick={() => setMobileOpen(true)} aria-label="Open more navigation">
+          <Menu size={19} aria-hidden="true" /><span>More</span>
+        </button>
+      </nav>
     </div>
   )
 }
 
-export function PageHeader({ title, subtitle, action }: {
-  title: string; subtitle?: string; action?: React.ReactNode
+export function PageHeader({ title, subtitle, eyebrow, action }: {
+  title: string; subtitle?: string; eyebrow?: string; action?: React.ReactNode
 }) {
   return (
-    <div style={{
-      display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
-      marginBottom: '1.5rem', flexWrap: 'wrap', gap: 12,
-    }}>
-      <div>
-        <h1 style={{ fontSize: 22, fontWeight: 800, color: '#e4e4f0', marginBottom: 3 }}>{title}</h1>
-        {subtitle && <p style={{ color: '#8b8fa8', fontSize: 14 }}>{subtitle}</p>}
+    <header className="page-header">
+      <div className="page-heading">
+        {eyebrow && <span className="page-eyebrow">{eyebrow}</span>}
+        <h1>{title}</h1>
+        {subtitle && <p>{subtitle}</p>}
       </div>
-      {action && <div>{action}</div>}
-    </div>
+      {action && <div className="page-actions">{action}</div>}
+    </header>
   )
 }

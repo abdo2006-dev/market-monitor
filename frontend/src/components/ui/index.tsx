@@ -1,31 +1,22 @@
-import React from 'react'
+import React, { useEffect } from 'react'
+import { AlertTriangle, Inbox, LoaderCircle, X } from 'lucide-react'
 import { cn, EVENT_COLORS, EVENT_LABELS, STOCK_LABELS } from '../../lib/utils'
 
 // ── Card ─────────────────────────────────────────────────────────────────────
 
 export function Card({ children, className, style }: { children: React.ReactNode; className?: string; style?: React.CSSProperties }) {
-  return (
-    <div className={cn('card', className)} style={{
-      background: '#1a1d2e', border: '1px solid #2d3048', borderRadius: 12,
-      padding: '1.25rem', boxShadow: '0 4px 24px rgba(0,0,0,0.2)',
-      ...style,
-    }}>
-      {children}
-    </div>
-  )
+  return <div className={cn('card', className)} style={style}>{children}</div>
 }
 
 export function StatCard({ label, value, icon, color = '#6366f1' }: { label: string; value: number | string; icon: React.ReactNode; color?: string }) {
   return (
-    <Card>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div>
-          <div style={{ fontSize: 13, color: '#8b8fa8', marginBottom: 6 }}>{label}</div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: '#e4e4f0' }}>{value}</div>
-        </div>
-        <div style={{ background: color + '22', borderRadius: 10, padding: 10, color }}>
-          {icon}
-        </div>
+    <Card className="ui-stat-card">
+      <div className="ui-stat-copy">
+        <span>{label}</span>
+        <strong>{value}</strong>
+      </div>
+      <div className="ui-stat-icon" style={{ color, borderColor: `${color}44`, background: `${color}12` }}>
+        {icon}
       </div>
     </Card>
   )
@@ -40,26 +31,15 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 export function Button({ children, variant = 'primary', size = 'md', loading, className, style, ...props }: ButtonProps) {
-  const styles: Record<string, React.CSSProperties> = {
-    primary: { background: '#6366f1', color: '#fff', border: 'none' },
-    secondary: { background: '#2d3048', color: '#e4e4f0', border: '1px solid #3d3f5a' },
-    danger: { background: '#ef4444', color: '#fff', border: 'none' },
-    ghost: { background: 'transparent', color: '#8b8fa8', border: '1px solid #2d3048' },
-  }
-  const sizeStyles = {
-    sm: { padding: '5px 12px', fontSize: 13 },
-    md: { padding: '8px 18px', fontSize: 14 },
-  }
   return (
     <button
       {...props}
-      style={{
-        borderRadius: 8, cursor: loading || props.disabled ? 'not-allowed' : 'pointer',
-        fontWeight: 500, opacity: loading || props.disabled ? 0.6 : 1,
-        transition: 'all 0.15s', ...styles[variant], ...sizeStyles[size], ...style,
-      }}
+      className={cn('ui-button', `ui-button--${variant}`, `ui-button--${size}`, className)}
+      style={style}
+      disabled={loading || props.disabled}
     >
-      {loading ? '⏳ Loading...' : children}
+      {loading && <span className="ui-spinner" aria-hidden="true" />}
+      {children}
     </button>
   )
 }
@@ -82,15 +62,7 @@ export function EventBadge({ type }: { type: string }) {
 
 export function StockBadge({ status }: { status: string }) {
   const info = STOCK_LABELS[status] || { label: status, color: '#6b7280' }
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center',
-      background: info.color + '22', color: info.color, border: `1px solid ${info.color}44`,
-      borderRadius: 6, padding: '2px 8px', fontSize: 12, fontWeight: 600,
-    }}>
-      {info.label}
-    </span>
-  )
+  return <span className={cn('stock-indicator', `stock-indicator--${status}`)}>{info.label}</span>
 }
 
 // ── Input ─────────────────────────────────────────────────────────────────────
@@ -100,54 +72,39 @@ interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
 }
 
 export function Input({ label, id, style, ...props }: InputProps) {
-  const inputStyle: React.CSSProperties = {
-    width: '100%', background: '#0f1117', border: '1px solid #2d3048',
-    borderRadius: 8, padding: '8px 12px', color: '#e4e4f0', fontSize: 14,
-    outline: 'none', ...style,
-  }
   if (label) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-        <label htmlFor={id} style={{ fontSize: 13, color: '#8b8fa8' }}>{label}</label>
-        <input id={id} {...props} style={inputStyle} />
+      <div className="field">
+        <label htmlFor={id} className="field-label">{label}</label>
+        <input id={id} {...props} className={cn('ui-input', props.className)} style={style} />
       </div>
     )
   }
-  return <input {...props} style={inputStyle} />
+  return <input {...props} className={cn('ui-input', props.className)} style={style} />
 }
 
 export function Select({ label, id, children, style, ...props }: React.SelectHTMLAttributes<HTMLSelectElement> & { label?: string }) {
-  const selectStyle: React.CSSProperties = {
-    width: '100%', background: '#0f1117', border: '1px solid #2d3048',
-    borderRadius: 8, padding: '8px 12px', color: '#e4e4f0', fontSize: 14,
-    outline: 'none', cursor: 'pointer', ...style,
-  }
   if (label) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-        <label htmlFor={id} style={{ fontSize: 13, color: '#8b8fa8' }}>{label}</label>
-        <select id={id} {...props} style={selectStyle}>{children}</select>
+      <div className="field">
+        <label htmlFor={id} className="field-label">{label}</label>
+        <select id={id} {...props} className={cn('ui-select', props.className)} style={style}>{children}</select>
       </div>
     )
   }
-  return <select {...props} style={selectStyle}>{children}</select>
+  return <select {...props} className={cn('ui-select', props.className)} style={style}>{children}</select>
 }
 
 export function Textarea({ label, id, style, ...props }: React.TextareaHTMLAttributes<HTMLTextAreaElement> & { label?: string }) {
-  const s: React.CSSProperties = {
-    width: '100%', background: '#0f1117', border: '1px solid #2d3048',
-    borderRadius: 8, padding: '8px 12px', color: '#e4e4f0', fontSize: 14,
-    outline: 'none', resize: 'vertical', ...style,
-  }
   if (label) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-        <label htmlFor={id} style={{ fontSize: 13, color: '#8b8fa8' }}>{label}</label>
-        <textarea id={id} {...props} style={s} />
+      <div className="field">
+        <label htmlFor={id} className="field-label">{label}</label>
+        <textarea id={id} {...props} className={cn('ui-textarea', props.className)} style={style} />
       </div>
     )
   }
-  return <textarea {...props} style={s} />
+  return <textarea {...props} className={cn('ui-textarea', props.className)} style={style} />
 }
 
 // ── Modal ─────────────────────────────────────────────────────────────────────
@@ -155,22 +112,29 @@ export function Textarea({ label, id, style, ...props }: React.TextareaHTMLAttri
 export function Modal({ open, onClose, title, children, width = 600 }: {
   open: boolean; onClose: () => void; title: string; children: React.ReactNode; width?: number
 }) {
+  useEffect(() => {
+    if (!open) return
+    const previousOverflow = document.body.style.overflow
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [onClose, open])
+
   if (!open) return null
   return (
-    <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 1000,
-      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
-    }} onClick={onClose}>
-      <div style={{
-        background: '#1a1d2e', border: '1px solid #2d3048', borderRadius: 14,
-        width: '100%', maxWidth: width, maxHeight: '90vh', overflowY: 'auto',
-        boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
-      }} onClick={e => e.stopPropagation()}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1.25rem 1.5rem', borderBottom: '1px solid #2d3048' }}>
-          <h3 style={{ fontWeight: 700, fontSize: 17 }}>{title}</h3>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#8b8fa8', cursor: 'pointer', fontSize: 20 }}>×</button>
+    <div className="ui-modal-backdrop" onClick={onClose}>
+      <div className="ui-modal" role="dialog" aria-modal="true" aria-label={title} style={{ maxWidth: width }} onClick={e => e.stopPropagation()}>
+        <div className="ui-modal-head">
+          <h3>{title}</h3>
+          <button onClick={onClose} className="icon-button" aria-label={`Close ${title}`}><X size={19} /></button>
         </div>
-        <div style={{ padding: '1.5rem' }}>{children}</div>
+        <div className="ui-modal-body">{children}</div>
       </div>
     </div>
   )
@@ -180,16 +144,12 @@ export function Modal({ open, onClose, title, children, width = 600 }: {
 
 export function Table({ headers, children }: { headers: string[]; children: React.ReactNode }) {
   return (
-    <div style={{ overflowX: 'auto' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
+    <div className="ui-table-wrap">
+      <table className="ui-table">
         <thead>
           <tr>
             {headers.map(h => (
-              <th key={h} style={{
-                padding: '10px 14px', textAlign: 'left', color: '#8b8fa8',
-                fontWeight: 600, fontSize: 12, textTransform: 'uppercase',
-                borderBottom: '1px solid #2d3048', letterSpacing: 0.5,
-              }}>{h}</th>
+              <th key={h}>{h}</th>
             ))}
           </tr>
         </thead>
@@ -200,49 +160,35 @@ export function Table({ headers, children }: { headers: string[]; children: Reac
 }
 
 export function Tr({ children, onClick }: { children: React.ReactNode; onClick?: () => void }) {
-  return (
-    <tr onClick={onClick} style={{
-      borderBottom: '1px solid #1e2235', cursor: onClick ? 'pointer' : undefined,
-      transition: 'background 0.1s',
-    }}
-      onMouseEnter={e => { if (onClick) (e.currentTarget as HTMLElement).style.background = '#222640' }}
-      onMouseLeave={e => { if (onClick) (e.currentTarget as HTMLElement).style.background = 'transparent' }}
-    >{children}</tr>
-  )
+  return <tr onClick={onClick} style={{ cursor: onClick ? 'pointer' : undefined }}>{children}</tr>
 }
 
 export function Td({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
-  return <td style={{ padding: '11px 14px', color: '#c4c6d8', verticalAlign: 'middle', ...style }}>{children}</td>
+  return <td style={style}>{children}</td>
 }
 
 // ── Loading / Empty ────────────────────────────────────────────────────────────
 
 export function Loading({ text = 'Loading...' }: { text?: string }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '3rem', color: '#8b8fa8' }}>
-      <div style={{ textAlign: 'center' }}>
-        <div style={{ fontSize: 32, marginBottom: 8 }}>⏳</div>
-        <div>{text}</div>
-      </div>
+    <div className="ui-state" role="status">
+      <div><span className="ui-state-icon"><LoaderCircle className="ui-spinner" size={22} /></span><div>{text}</div></div>
     </div>
   )
 }
 
-export function EmptyState({ icon = '📭', title, description }: { icon?: string; title: string; description?: string }) {
+export function EmptyState({ icon, title, description }: { icon?: React.ReactNode; title: string; description?: string }) {
   return (
-    <div style={{ textAlign: 'center', padding: '4rem 2rem', color: '#8b8fa8' }}>
-      <div style={{ fontSize: 40, marginBottom: 12 }}>{icon}</div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: '#c4c6d8', marginBottom: 6 }}>{title}</div>
-      {description && <div style={{ fontSize: 14 }}>{description}</div>}
+    <div className="ui-state">
+      <div><span className="ui-state-icon">{icon || <Inbox size={21} />}</span><h3>{title}</h3>{description && <p>{description}</p>}</div>
     </div>
   )
 }
 
 export function ErrorState({ message }: { message: string }) {
   return (
-    <div style={{ textAlign: 'center', padding: '3rem', color: '#ef4444' }}>
-      <div style={{ fontSize: 32, marginBottom: 8 }}>⚠️</div>
-      <div>{message}</div>
+    <div className="ui-state ui-state--error" role="alert">
+      <div><span className="ui-state-icon"><AlertTriangle size={21} /></span><h3>Something needs attention</h3><p>{message}</p></div>
     </div>
   )
 }

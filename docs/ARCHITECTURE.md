@@ -585,6 +585,12 @@ explicit internal boundaries. Rationale and rejected alternatives:
 This is a target, not a claim about today. See `docs/PROJECT_STATUS.md` for what is
 actually built.
 
+The frontend remains a client of these boundaries. Its implemented visual and interaction
+contract is documented separately in `docs/UI_UX_SYSTEM.md`: one responsive shell, shared
+tokens/primitives, and truthful status semantics for Search, Export, and Sync. React may
+present or progressively disclose backend evidence; it must not recalculate trust,
+completeness, provenance, or orchestration.
+
 ## B-2. Layer responsibilities
 
 **api/** — Parse and validate requests. Enforce authentication where applicable. Call

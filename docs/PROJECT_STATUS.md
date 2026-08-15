@@ -3,13 +3,13 @@
 **Read this first.** This is the handoff file between working sessions. If it is stale,
 fix it as part of the task.
 
-_Last updated: 2026-08-15, isolated V2 user-testing Preview ready; Production rollout remains blocked._
+_Last updated: 2026-08-15, premium daily-workflow Preview ready for owner testing; Production rollout remains blocked._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Safe V2 user-testing Preview ready** — the cumulative V2 build is deployed against a separate seeded Neon project. Production remains Case B- with duplicates and its rollout blockers are unchanged. |
+| **Current phase** | **Premium V2 user-testing Preview ready** — the three daily workflows now share a responsive, evidence-first UI system on the isolated Preview. Production remains Case B- with duplicates and its rollout blockers are unchanged. |
 | **Phase 1D base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` (Phase 1C checkpoint) |
 | **Phase 1C base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` |
 | **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
@@ -22,9 +22,9 @@ _Last updated: 2026-08-15, isolated V2 user-testing Preview ready; Production ro
 Priority remains: P0 migration safety, P1 Sync, P2 Search, P3 Export, P4 daily-workflow
 UX, then lower-priority features. Treasury Audit remains design-only.
 
-The owner's immediate next step is hands-on testing through the protected Preview URL in
-`docs/PREVIEW_TESTING.md`. Preview feedback may justify focused UI corrections; it does not
-authorize Phase 1F or any Production rollout write.
+The owner's immediate next step is hands-on desktop and mobile testing through the protected
+Preview URL in `docs/PREVIEW_TESTING.md`. Preview feedback may justify focused UI corrections;
+it does not authorize Phase 1F or any Production rollout write.
 
 ## 2. Phase 1C outcome
 
@@ -84,6 +84,27 @@ Phase 1D over 20 samples of 20 repetitions: median **7.35 ms → 7.34 ms**, p95 
 7.43 ms**. This excludes provider/network acquisition, which remains the dominant and
 already bounded request cost; no queue/cache/object-store/export-run infrastructure is
 justified by this evidence. Full details: `docs/EXPORT_ARCHITECTURE.md`.
+
+## 2.2 Premium daily-workflow UX outcome
+
+Search, Exports, and Competitors now use one documented visual and interaction system; see
+`docs/UI_UX_SYSTEM.md`.
+
+- The application shell uses a restrained graphite/blue palette, Lucide icons, grouped
+  navigation, a clear protected-Preview state, and route-level lazy loading. Below 960 px it
+  becomes a mobile header, three-workflow bottom navigation, and secondary navigation drawer.
+- Search is a denser decision surface. Reliable market references remain visually primary,
+  while older/degraded evidence is grouped separately without hiding it or changing backend
+  trust calculations.
+- Exports is an explicit four-step prepare/review/download workflow. Live, stored, partial,
+  suspicious-empty, failure, and no-cache outcomes remain distinct.
+- Competitors is an operations center with readiness counts, lifecycle/completeness evidence,
+  primary Sync actions, and secondary destructive actions moved into contextual menus.
+- Shared primitives now cover fields, buttons, tables, feedback, stock indicators, focus,
+  loading, and reduced motion. The browser audit covers 1440, 1280, 1024, 961/959, 768, and
+  390 px without horizontal document overflow or console errors.
+- No API contract, data model, migration, Sync ownership rule, Search trust rule, Export
+  provenance rule, fixture safety gate, or Production setting changed.
 
 ## 3. Phase 1B.2 outcome
 
@@ -233,8 +254,8 @@ used.
 
 | Gate | Result |
 |---|---|
-| Full backend | **215 passed**, 11 pre-existing warnings |
-| Critical path | **142 passed**, 73 deselected |
+| Full backend | **221 passed**, 11 pre-existing warnings, against disposable local PostgreSQL |
+| Critical path | **143 passed**, 78 deselected, against disposable local PostgreSQL |
 | Phase 1C Search | **39 passed**: 35 PostgreSQL critical + 4 pure cycle-policy |
 | Phase 1D Export + cycle policy | **28 passed**: 24 PostgreSQL critical + 4 pure policy |
 | Phase 1A daily/schema regression | **93 passed** |
@@ -244,14 +265,15 @@ used.
 | Completeness safety selection | **5 passed** |
 | Fresh / prior-`0004` upgrade | both reached `0005` head |
 | Alembic drift | `No new upgrade operations detected` |
-| Frontend tests | **16 passed** with Vitest + Testing Library (8 Search + 8 Export) |
-| Frontend typecheck/build | pass; 2,414 modules, 710.51 kB main chunk |
+| Preview/security release gate | **9 passed** |
+| Frontend tests | **19 passed** with Vitest + Testing Library (9 Search + 8 Export + 2 Competitors) |
+| Frontend typecheck/build | pass; 2,417 modules; route-split entry 209.08 kB and largest lazy route 388.72 kB |
 | Startup/workflow | strict startup passes with 36 routes; 4 YAML/security tests pass |
 
 Known pre-existing warnings remain: Pydantic class-based config, FastAPI `on_event`, the
 custom pytest-asyncio loop fixture, Starlette's multipart import, React Router v7 future
-flags, Vite's CJS Node API, and the existing chunk-size warning. Frontend lint is not an
-available gate because ESLint is not installed.
+flags, and Vite's CJS Node API. The former monolithic frontend chunk warning is resolved by
+route-level splitting. Frontend lint is not an available gate because ESLint is not installed.
 
 ## 8. Remaining risks
 
@@ -283,14 +305,11 @@ available gate because ESLint is not installed.
 
 ## 9. Next recommended task
 
-Follow `docs/PHASE_1E_1_RELEASE_UNBLOCK.md` in order. First prove the configured Neon
-restore window and a disposable restore from a current snapshot/approved backup. Then,
-under separately authorized maintenance, truthfully stamp `0003`, consolidate the 12
-logical duplicate groups while preserving all 117 linked history rows, and upgrade through
-`0004` and `0005`. Only after Case A proof should the cumulative branch be reviewed and
-integrated, `production-sync` configured default-off, the protected V2 deployment made,
-and the one-competitor smoke separately authorized. Do not begin Phase 1F or taxonomy
-cleanup while this gate is blocked.
+The owner should complete the five-part Preview checklist in `docs/PREVIEW_TESTING.md`:
+Search, Exports, Competitors/Sync, desktop fit, and mobile fit. Capture focused feedback and
+make only evidence-backed Preview corrections. Do not begin Phase 1F, merge to `main`, change
+Production configuration/data, or start the production release-unblock runbook without new
+authorization.
 
 ## 10. Decisions not to reverse
 
