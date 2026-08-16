@@ -1,5 +1,9 @@
 """Generate an APP_AUTH_PASSWORD_HASH without echoing the password."""
 from getpass import getpass
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.auth import hash_password
 
