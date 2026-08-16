@@ -161,8 +161,12 @@ introduce a silent bug here.
   If a test fails, find the cause and report it.
 - Bug fixes require a regression test whenever the bug is reachable from a unit or
   integration test.
-- Scraper tests must use committed fixtures or mocks. **Never** put a request to a live
-  competitor storefront in the test suite or in CI.
+- Scraper tests and required CI gates must use committed fixtures or mocks. **Never** put a
+  request to a live competitor storefront in pytest, Playwright, a push/PR workflow, or any
+  blocking release check. Live coverage belongs only in the manual, observational,
+  database-free `competitor-coverage-smoke.yml` path documented in
+  `docs/COMPETITOR_COVERAGE.md`; its warnings are evidence for operator review, not a
+  deterministic test failure.
 - **Characterisation tests are not aspirational.** Several tests in `tests/critical/`
   deliberately assert *current, defective* behaviour so that fixing it is a visible change
   — for example `test_concurrent_scans_of_one_competitor_are_not_prevented` asserts that

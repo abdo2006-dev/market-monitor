@@ -79,11 +79,14 @@ of their JavaScript bundles → regex out a `*.myshopify.com` domain and a value
 
 Two distinct concerns:
 
-**Technical.** The fallback pattern is `["']([a-f0-9]{32,})["']` (`:489`) — *any* 32+
-character hex string in any downloaded bundle. It will frequently match a build hash, a
-cache key, or an unrelated identifier. Those get sent as an auth header to a third party.
-Separately, downloading 40 JS bundles per discovery attempt is a meaningful load on
-someone else's origin.
+**Technical.** Phase 1F added a narrow Vite/minified-client pattern: a public Shopify
+GraphQL endpoint must be immediately followed by a quoted 20–128-character token-like
+assignment. This enabled the platform-level root-products fallback without hardcoding a
+store token. The older fallback pattern `["']([a-f0-9]{32,})["']` still exists after the
+header-adjacent checks and can match a build hash, cache key, or unrelated identifier.
+Separately, downloading up to 40 JS bundles per discovery attempt is a meaningful load on
+someone else's origin. Discovery values are never logged, stored in telemetry, fixtures,
+the coverage artifact, or committed source.
 
 **Legal / ToS.** Shopify Storefront tokens are public-by-design for a storefront's own
 front end, so this is not a credential *breach*. But extracting a token from someone's

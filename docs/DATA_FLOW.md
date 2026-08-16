@@ -108,9 +108,11 @@ Completeness is separate from whether code executed:
 | `suspicious_empty` | no observed rows | no |
 | `failed` | no | no |
 
-For Shopify, a fifth full 250-item page means another page may exist. The run records
-1,250 products, `page_cap_reached=true`, and `completeness=partial`. Salla cursor evidence
-and generic “next page” evidence receive the same conservative treatment.
+For Shopify, a full 250-item page at the configured ceiling means another page may exist.
+For example, a five-page request records 1,250 products, `page_cap_reached=true`, and
+`completeness=partial`. Salla cursor evidence and generic “next page” evidence receive the
+same conservative treatment. The Phase 1F default ceiling is 100, but normal providers
+stop earlier on a real end signal.
 
 Failures become safe categories such as timeout, rate limit, temporary network, or invalid
 configuration. Raw exception bodies, tokens, response content, and connection strings are

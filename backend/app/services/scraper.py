@@ -14,7 +14,8 @@ from app.domain.acquisition import INTERNAL_OBSERVED_AT_KEY
 
 logger = logging.getLogger(__name__)
 
-MAX_PAGES_DEFAULT = 5
+MAX_PAGES_DEFAULT = 100
+MAX_CATALOG_PAGE_CEILING = 100
 PAGE_DELAY_DEFAULT = 2.0
 TIMEOUT_DEFAULT = 30000  # ms
 DEFAULT_BROWSER_USER_AGENT = (
@@ -68,6 +69,7 @@ async def scrape_competitor(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
     competitor dict must have: base_url, listing_urls, selector_config
     Returns list of product dicts.
     """
+    max_pages = _validated_page_ceiling(max_pages)
     scrape_type = competitor.get("scrape_type", "generic_selector")
     telemetry = telemetry if telemetry is not None else {}
     listing_urls = competitor.get("listing_urls", [])
@@ -175,12 +177,38 @@ async def scrape_competitor(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
     return all_products
 
 
+def _validated_page_ceiling(max_pages: int) -> int:
+    """Validate the caller-controlled acquisition safety ceiling.
+
+    Adapters must still prove completion from an empty/short page or provider
+    cursor. Reaching this ceiling is always partial coverage.
+    """
+    try:
+        value = int(max_pages)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_pages must be an integer") from exc
+    if not 1 <= value <= MAX_CATALOG_PAGE_CEILING:
+        raise ValueError(
+            f"max_pages must be between 1 and {MAX_CATALOG_PAGE_CEILING}"
+        )
+    return value
+
+
+def _record_pagination_warning(telemetry: Optional[dict], warning: str) -> None:
+    if telemetry is None:
+        return
+    warnings = telemetry.setdefault("warnings", [])
+    if warning not in warnings:
+        warnings.append(warning)
+
+
 async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT,
                               user_agent: str = "MarketMonitor/1.0",
                               telemetry: Optional[dict] = None) -> list[dict]:
     """Scrape Shopify catalogs, preserving collection names as categories."""
     import aiohttp
 
+    max_pages = _validated_page_ceiling(max_pages)
     base_url = competitor.get("base_url", "").rstrip("/")
     selector_config = competitor.get("selector_config", {}) or {}
     listing_urls = competitor.get("listing_urls") or []
@@ -198,11 +226,13 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
     ) as session:
         if selector_config.get("prefer_storefront_graphql"):
             all_products = await _scrape_shopify_storefront_graphql(
-                session, base_url, selector_config, telemetry=telemetry
+                session, base_url, selector_config, max_pages=max_pages,
+                telemetry=telemetry,
             )
             if all_products:
                 telemetry["strategy"] = "shopify_storefront_graphql"
                 return all_products
+            _clear_failure_telemetry(telemetry)
 
         if selector_config.get("include_all_products", True) and selector_config.get("prefer_all_products_first", True):
             all_products = await _scrape_shopify_json_targets(
@@ -229,7 +259,7 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
         )
 
         if not all_products:
-            _clear_failure_telemetry(telemetry)
+            prior_failure = _clear_failure_telemetry(telemetry)
             all_products = await _scrape_custom_storefront_fallback(
                 session,
                 base_url,
@@ -237,6 +267,8 @@ async def scrape_shopify_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAU
                 max_pages=max_pages,
                 telemetry=telemetry,
             )
+            if not all_products and not telemetry.get("failure_category"):
+                telemetry.update(prior_failure)
 
     return all_products
 
@@ -266,9 +298,12 @@ async def _scrape_shopify_json_targets(
     return result
 
 
-def _clear_failure_telemetry(telemetry: dict) -> None:
+def _clear_failure_telemetry(telemetry: dict) -> dict:
+    removed = {}
     for key in ("failure_category", "failure_message", "failure_retryable"):
-        telemetry.pop(key, None)
+        if key in telemetry:
+            removed[key] = telemetry.pop(key)
+    return removed
 
 
 async def _scrape_shopify_json_targets_aiohttp(
@@ -278,6 +313,7 @@ async def _scrape_shopify_json_targets_aiohttp(
     all_products = []
     seen_urls = set()
     for target in targets:
+        seen_pages: set[tuple[str, ...]] = set()
         for page_num in range(1, max_pages + 1):
             url = f"{target['url']}{'&' if '?' in target['url'] else '?'}limit=250&page={page_num}"
             try:
@@ -304,10 +340,37 @@ async def _scrape_shopify_json_targets_aiohttp(
                     )
                 break
 
+            if (
+                not isinstance(data, dict)
+                or not isinstance(data.get("products", []), list)
+                or any(not isinstance(raw, dict) for raw in data.get("products", []))
+            ):
+                if telemetry is not None:
+                    telemetry.update(
+                        failure_category="malformed_response",
+                        failure_message="Shopify catalog returned malformed data",
+                        failure_retryable=False,
+                    )
+                break
             observed_at = datetime.now(timezone.utc)
             products = data.get("products") or []
             if not products:
                 break
+            page_identity = tuple(
+                str(raw.get("id") or raw.get("handle") or index)
+                for index, raw in enumerate(products)
+                if isinstance(raw, dict)
+            )
+            if page_identity in seen_pages:
+                if telemetry is not None:
+                    telemetry.update(
+                        failure_category="duplicate_pagination",
+                        failure_message="Shopify pagination repeated a catalog page",
+                        failure_retryable=False,
+                    )
+                _record_pagination_warning(telemetry, "duplicate_catalog_page")
+                break
+            seen_pages.add(page_identity)
             if telemetry is not None:
                 telemetry["pages_fetched"] = telemetry.get("pages_fetched", 0) + 1
                 if page_num == max_pages and len(products) == 250:
@@ -342,6 +405,7 @@ async def _scrape_shopify_json_targets_httpx(
     async with httpx.AsyncClient(headers=headers, timeout=20.0, follow_redirects=True) as client:
         for target in targets:
             referer = target["url"].removesuffix("/products.json")
+            seen_pages: set[tuple[str, ...]] = set()
             for page_num in range(1, max_pages + 1):
                 url = f"{target['url']}{'&' if '?' in target['url'] else '?'}limit=250&page={page_num}"
                 try:
@@ -368,10 +432,37 @@ async def _scrape_shopify_json_targets_httpx(
                         )
                     break
 
+                if (
+                    not isinstance(data, dict)
+                    or not isinstance(data.get("products", []), list)
+                    or any(not isinstance(raw, dict) for raw in data.get("products", []))
+                ):
+                    if telemetry is not None:
+                        telemetry.update(
+                            failure_category="malformed_response",
+                            failure_message="Shopify catalog returned malformed data",
+                            failure_retryable=False,
+                        )
+                    break
                 observed_at = datetime.now(timezone.utc)
                 products = data.get("products") or []
                 if not products:
                     break
+                page_identity = tuple(
+                    str(raw.get("id") or raw.get("handle") or index)
+                    for index, raw in enumerate(products)
+                    if isinstance(raw, dict)
+                )
+                if page_identity in seen_pages:
+                    if telemetry is not None:
+                        telemetry.update(
+                            failure_category="duplicate_pagination",
+                            failure_message="Shopify pagination repeated a catalog page",
+                            failure_retryable=False,
+                        )
+                    _record_pagination_warning(telemetry, "duplicate_catalog_page")
+                    break
+                seen_pages.add(page_identity)
                 if telemetry is not None:
                     telemetry["pages_fetched"] = telemetry.get("pages_fetched", 0) + 1
                     if page_num == max_pages and len(products) == 250:
@@ -398,6 +489,7 @@ async def scrape_salla_json(competitor: dict, max_pages: int = MAX_PAGES_DEFAULT
     """Scrape Salla storefront category product APIs."""
     import aiohttp
 
+    max_pages = _validated_page_ceiling(max_pages)
     base_url = competitor.get("base_url", "").rstrip("/")
     selector_config = competitor.get("selector_config", {}) or {}
     listing_urls = competitor.get("listing_urls") or []
@@ -503,19 +595,28 @@ async def _scrape_custom_storefront_fallback(
 ) -> list[dict]:
     """Fallback for Shopify-backed custom storefronts that hide products.json."""
     products = await _scrape_shopify_storefront_graphql(
-        session, base_url, selector_config, telemetry=telemetry
+        session, base_url, selector_config, max_pages=max_pages,
+        telemetry=telemetry,
     )
     if products:
         return products
-    return await _scrape_sitemap_product_pages(
+    graph_failure = _clear_failure_telemetry(telemetry)
+    products = await _scrape_sitemap_product_pages(
         session, base_url, selector_config, max_pages=max_pages, telemetry=telemetry
     )
+    if not products and not telemetry.get("failure_category"):
+        telemetry.update(graph_failure)
+    return products
 
 
 async def _scrape_shopify_storefront_graphql(
-    session, base_url: str, selector_config: dict, telemetry: Optional[dict] = None
+    session, base_url: str, selector_config: dict,
+    max_pages: int = MAX_PAGES_DEFAULT, telemetry: Optional[dict] = None,
 ) -> list[dict]:
-    config = await _storefront_graphql_config(session, base_url, selector_config)
+    max_pages = _validated_page_ceiling(max_pages)
+    config = await _storefront_graphql_config(
+        session, base_url, selector_config, max_pages=max_pages
+    )
     if not config:
         return []
 
@@ -526,13 +627,27 @@ async def _scrape_shopify_storefront_graphql(
     }
     products = []
     seen = set()
-    max_products = int(config.get("max_products", 500))
+    max_products = min(
+        int(config.get("max_products") or max_pages * 250), max_pages * 250
+    )
+
+    if not config["collection_handles"]:
+        return await _scrape_shopify_storefront_products(
+            session,
+            base_url,
+            endpoint,
+            headers,
+            max_products=max_products,
+            max_pages=max_pages,
+            telemetry=telemetry,
+        )
 
     for handle in config["collection_handles"]:
         remaining = max_products
+        pages_for_handle = 0
         after = None
         category = _title_from_handle(handle)
-        while remaining > 0:
+        while remaining > 0 and pages_for_handle < max_pages:
             first = min(remaining, 250)
             payload = {
                 "query": _STOREFRONT_COLLECTION_QUERY,
@@ -556,8 +671,8 @@ async def _scrape_shopify_storefront_graphql(
                             )
                         return products
                     data = await resp.json(content_type=None)
-            except Exception as e:
-                logger.warning("Could not fetch Storefront GraphQL for %s: %s", base_url, e)
+            except Exception:
+                logger.warning("Could not fetch Storefront GraphQL for %s", base_url)
                 if telemetry is not None:
                     telemetry.update(
                         failure_category="temporary_network",
@@ -566,8 +681,8 @@ async def _scrape_shopify_storefront_graphql(
                     )
                 return products
 
-            if data.get("errors"):
-                logger.warning("Storefront GraphQL errors for %s: %s", base_url, data["errors"])
+            if not isinstance(data, dict) or data.get("errors"):
+                logger.warning("Storefront GraphQL returned errors for %s", base_url)
                 if telemetry is not None:
                     telemetry.update(
                         failure_category="acquisition_error",
@@ -581,8 +696,19 @@ async def _scrape_shopify_storefront_graphql(
             category = collection.get("title") or category
             product_edges = ((collection.get("products") or {}).get("edges")) or []
             page_info = (collection.get("products") or {}).get("pageInfo") or {}
+            if not isinstance(product_edges, list) or any(
+                not isinstance(edge, dict) for edge in product_edges
+            ):
+                if telemetry is not None:
+                    telemetry.update(
+                        failure_category="malformed_response",
+                        failure_message="Storefront GraphQL returned malformed products",
+                        failure_retryable=False,
+                    )
+                return products
             if not product_edges:
                 break
+            pages_for_handle += 1
             if telemetry is not None:
                 telemetry["strategy"] = "shopify_storefront_graphql"
                 telemetry["pages_fetched"] = telemetry.get("pages_fetched", 0) + 1
@@ -597,18 +723,162 @@ async def _scrape_shopify_storefront_graphql(
             remaining -= len(product_edges)
             if not page_info.get("hasNextPage"):
                 break
-            if remaining <= 0:
+            if remaining <= 0 or pages_for_handle >= max_pages:
                 if telemetry is not None:
                     telemetry["page_cap_reached"] = True
                 break
-            after = page_info.get("endCursor")
-            if not after:
+            next_cursor = page_info.get("endCursor")
+            if not next_cursor or next_cursor == after:
+                if telemetry is not None:
+                    telemetry.update(
+                        failure_category="malformed_response",
+                        failure_message="Storefront pagination cursor did not advance",
+                        failure_retryable=False,
+                    )
+                _record_pagination_warning(
+                    telemetry, "pagination_cursor_did_not_advance"
+                )
                 break
+            after = next_cursor
 
     return products
 
 
-async def _storefront_graphql_config(session, base_url: str, selector_config: dict) -> Optional[dict]:
+async def _scrape_shopify_storefront_products(
+    session,
+    base_url: str,
+    endpoint: str,
+    headers: dict,
+    *,
+    max_products: int,
+    max_pages: int,
+    telemetry: Optional[dict] = None,
+) -> list[dict]:
+    """Cursor-paginate the public Storefront root products connection.
+
+    Custom Shopify clients often have no collection URLs even though their
+    browser queries this connection. Completion still requires Shopify's
+    ``hasNextPage=false`` signal; reaching ``max_products`` is partial.
+    """
+    products: list[dict] = []
+    seen_products: set[str] = set()
+    seen_page_fingerprints: set[str] = set()
+    after = None
+
+    pages_fetched = 0
+    while len(products) < max_products and pages_fetched < max_pages:
+        first = min(250, max_products - len(products))
+        payload = {
+            "query": _STOREFRONT_PRODUCTS_QUERY,
+            "variables": {"first": first, "after": after},
+        }
+        try:
+            if telemetry is not None:
+                telemetry["request_count"] = telemetry.get("request_count", 0) + 1
+            async with session.post(endpoint, json=payload, headers=headers) as resp:
+                if resp.status >= 400:
+                    if telemetry is not None:
+                        telemetry.update(
+                            failure_category=(
+                                "rate_limited" if resp.status == 429
+                                else "temporary_network" if resp.status >= 500
+                                else "acquisition_error"
+                            ),
+                            failure_message="Storefront GraphQL request was rejected",
+                            failure_retryable=resp.status == 429 or resp.status >= 500,
+                        )
+                    return products
+                data = await resp.json(content_type=None)
+        except Exception:
+            if telemetry is not None:
+                telemetry.update(
+                    failure_category="temporary_network",
+                    failure_message="Storefront GraphQL request failed",
+                    failure_retryable=True,
+                )
+            return products
+
+        if not isinstance(data, dict) or data.get("errors"):
+            if telemetry is not None:
+                telemetry.update(
+                    failure_category="malformed_response",
+                    failure_message="Storefront GraphQL returned invalid catalog data",
+                    failure_retryable=False,
+                )
+            return products
+
+        connection = (data.get("data") or {}).get("products") or {}
+        edges = connection.get("edges") or []
+        page_info = connection.get("pageInfo") or {}
+        if not isinstance(edges, list) or any(
+            not isinstance(edge, dict) for edge in edges
+        ):
+            if telemetry is not None:
+                telemetry.update(
+                    failure_category="malformed_response",
+                    failure_message="Storefront GraphQL returned malformed products",
+                    failure_retryable=False,
+                )
+            return products
+        if not edges:
+            return products
+
+        observed_at = datetime.now(timezone.utc)
+        pages_fetched += 1
+        if telemetry is not None:
+            telemetry["strategy"] = "shopify_storefront_graphql"
+            telemetry["pages_fetched"] = telemetry.get("pages_fetched", 0) + 1
+
+        page_keys: list[str] = []
+        for edge in edges:
+            product = _extract_storefront_product(
+                (edge or {}).get("node") or {}, base_url, None
+            )
+            key = product.get("external_id") or product.get("url") if product else None
+            if key:
+                page_keys.append(str(key))
+            if product and key not in seen_products:
+                seen_products.add(key)
+                products.append(_stamp_observation(product, observed_at))
+
+        fingerprint = "|".join(page_keys)
+        if fingerprint and fingerprint in seen_page_fingerprints:
+            if telemetry is not None:
+                telemetry.update(
+                    failure_category="duplicate_pagination",
+                    failure_message="Storefront pagination repeated a catalog page",
+                    failure_retryable=False,
+                )
+            _record_pagination_warning(telemetry, "duplicate_catalog_page")
+            return products
+        if fingerprint:
+            seen_page_fingerprints.add(fingerprint)
+
+        if not page_info.get("hasNextPage"):
+            return products
+        if len(products) >= max_products or pages_fetched >= max_pages:
+            if telemetry is not None:
+                telemetry["page_cap_reached"] = True
+            return products
+        next_cursor = page_info.get("endCursor")
+        if not next_cursor or next_cursor == after:
+            if telemetry is not None:
+                telemetry.update(
+                    failure_category="malformed_response",
+                    failure_message="Storefront pagination cursor did not advance",
+                    failure_retryable=False,
+                )
+            _record_pagination_warning(telemetry, "pagination_cursor_did_not_advance")
+            return products
+        after = next_cursor
+
+    return products
+
+
+async def _storefront_graphql_config(
+    session, base_url: str, selector_config: dict,
+    max_pages: int = MAX_PAGES_DEFAULT,
+) -> Optional[dict]:
     configured = selector_config.get("storefront_graphql") or {}
     if configured.get("shop_domain") and configured.get("access_token"):
         return {
@@ -616,23 +886,26 @@ async def _storefront_graphql_config(session, base_url: str, selector_config: di
             "access_token": configured["access_token"],
             "api_version": configured.get("api_version", "2025-07"),
             "collection_handles": configured.get("collection_handles") or selector_config.get("collection_handles") or [],
-            "max_products": configured.get("max_products", 500),
+            "max_products": configured.get("max_products", max_pages * 250),
         }
 
     if selector_config.get("auto_discover_storefront_graphql", True) is False:
         return None
 
     handles = selector_config.get("collection_handles") or await _discover_collection_handles(session, base_url)
-    if not handles:
-        return None
-
     assets_text = await _discover_storefront_assets_text(session, base_url)
-    return _storefront_graphql_config_from_assets(base_url, selector_config, assets_text, handles)
+    return _storefront_graphql_config_from_assets(
+        base_url, selector_config, assets_text, handles,
+        default_max_products=max_pages * 250,
+    )
 
 
 def _storefront_graphql_config_from_assets(base_url: str, selector_config: dict, assets_text: str,
-                                           collection_handles: list[str]) -> Optional[dict]:
-    shop_domain = _regex_first(assets_text, r'["\']([a-z0-9][a-z0-9-]*\.myshopify\.com)["\']')
+                                           collection_handles: list[str],
+                                           default_max_products: int = MAX_PAGES_DEFAULT * 250) -> Optional[dict]:
+    shop_domain = _regex_first(
+        assets_text, r'\b([a-z0-9][a-z0-9-]*\.myshopify\.com)\b'
+    )
     if not shop_domain or "X-Shopify-Storefront-Access-Token" not in assets_text:
         return None
 
@@ -646,7 +919,7 @@ def _storefront_graphql_config_from_assets(base_url: str, selector_config: dict,
         "access_token": access_token,
         "api_version": api_version,
         "collection_handles": collection_handles,
-        "max_products": selector_config.get("max_products", 500),
+        "max_products": selector_config.get("max_products", default_max_products),
     }
 
 
@@ -664,7 +937,21 @@ def _storefront_access_token_from_assets(assets_text: str) -> Optional[str]:
             return token_match.group(1)
 
     token_match = re.search(r'["\']([a-f0-9]{32,})["\']', assets_text or "", re.IGNORECASE)
-    return token_match.group(1) if token_match else None
+    if token_match:
+        return token_match.group(1)
+
+    # Vite/minified custom storefronts commonly declare the endpoint and its
+    # public Storefront token as adjacent variables. Keep this deliberately
+    # narrow: a myshopify GraphQL endpoint must immediately precede a quoted
+    # 20–128 character token-like value. Do not select an arbitrary bundle
+    # string or emit the discovered value in logs/telemetry.
+    adjacent_endpoint_token = re.search(
+        r'myshopify\.com/api/20\d{2}-\d{2}/graphql\.json["\'`]\s*,\s*'
+        r'[A-Za-z_$][\w$]*\s*=\s*["\'`]([A-Za-z0-9_-]{20,128})["\'`]',
+        assets_text or "",
+        re.IGNORECASE,
+    )
+    return adjacent_endpoint_token.group(1) if adjacent_endpoint_token else None
 
 
 def _api_version_from_assets(assets_text: str) -> Optional[str]:
@@ -790,6 +1077,16 @@ variants(first: 10) {
     }
   }
 }
+"""
+
+
+_STOREFRONT_PRODUCTS_QUERY = f"""
+query GetProducts($first: Int!, $after: String) {{
+  products(first: $first, after: $after) {{
+    edges {{ cursor node {{ {_STOREFRONT_PRODUCT_FIELDS} }} }}
+    pageInfo {{ hasNextPage endCursor }}
+  }}
+}}
 """
 
 

@@ -3,13 +3,13 @@
 **Read this first.** This is the handoff file between working sessions. If it is stale,
 fix it as part of the task.
 
-_Last updated: 2026-08-15, premium daily-workflow Preview ready for owner testing; Production rollout remains blocked._
+_Last updated: 2026-08-16, Phase 1F deterministic acceptance and live coverage gate complete; Production rollout remains blocked._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Premium V2 user-testing Preview ready** — the three daily workflows now share a responsive, evidence-first UI system on the isolated Preview. Production remains Case B- with duplicates and its rollout blockers are unchanged. |
+| **Current phase** | **Phase 1F acceptance complete; protected Preview closeout in progress** — deterministic acquisition/morning-workflow/browser gates are enforced, and the 12-storefront live matrix is documented. Production remains Case B- with duplicates and is not recommended for rollout. |
 | **Phase 1D base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` (Phase 1C checkpoint) |
 | **Phase 1C base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` |
 | **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
@@ -22,9 +22,9 @@ _Last updated: 2026-08-15, premium daily-workflow Preview ready for owner testin
 Priority remains: P0 migration safety, P1 Sync, P2 Search, P3 Export, P4 daily-workflow
 UX, then lower-priority features. Treasury Audit remains design-only.
 
-The owner's immediate next step is hands-on desktop and mobile testing through the protected
-Preview URL in `docs/PREVIEW_TESTING.md`. Preview feedback may justify focused UI corrections;
-it does not authorize Phase 1F or any Production rollout write.
+The immediate next step is final protected-Preview deployment validation, followed by the
+owner's hands-on desktop and mobile checklist in `docs/PREVIEW_TESTING.md`. Nothing in
+Phase 1F authorizes a merge to `main`, a Production database write, or Production rollout.
 
 ## 2. Phase 1C outcome
 
@@ -106,6 +106,45 @@ Search, Exports, and Competitors now use one documented visual and interaction s
 - No API contract, data model, migration, Sync ownership rule, Search trust rule, Export
   provenance rule, fixture safety gate, or Production setting changed.
 
+## 2.3 Phase 1F acceptance and coverage outcome
+
+Phase 1F adds repeatable release evidence without turning third-party availability into a
+flaky required test.
+
+- `backend/tests/acceptance/` now covers long Shopify catalogs (including 1,767 products),
+  exact/empty terminal pages, the 100-page hard ceiling, duplicate/malformed/mid-failure
+  safety, root-products Storefront GraphQL, sitemap, Salla cursor, generic observations,
+  identity/price/currency/stock invariants, sanitized failures, and the exact registry.
+- A migrated-PostgreSQL morning journey proves durable Sync → freshness-aware Search →
+  explicit cached Export → independently acquired live Export. HTTP 202 remains queued,
+  never completed.
+- Playwright drives the actual React app at 1440×900, 1024×768, and 390×844 with synthetic
+  API interception. It parses real CSV/JSON/JSONL downloads, checks provenance/failure
+  states, keyboard/Escape/focus/reduced-motion behavior, overflow, and console errors.
+- Required CI runs deterministic acceptance, component tests, Playwright, typecheck, build,
+  critical PostgreSQL tests, migrations, and drift. Live storefront calls are isolated in
+  a manual, read-only, database-free, non-blocking workflow with pinned actions and a
+  sanitized short-retention artifact.
+- The default adapter page ceiling is now 100; providers still stop at a real end signal.
+  Full terminal pages, non-advancing cursors, repeated pages, malformed responses, and
+  failures remain partial/failed evidence and never authorize absence inference.
+- A platform-level Vite/minified-Shopify discovery pattern enabled Shopbloxs root-products
+  GraphQL without hardcoding or logging a Storefront token. Browser acceptance also found
+  and fixed the Export filename parser, which previously ignored `Content-Disposition`.
+
+Live evidence on 2026-08-16 is **10 healthy / 2 failed**. The healthy set includes
+Shopbloxs (534 products via root GraphQL) and BloxCrew (1,067 via GraphQL); across the ten
+healthy stores, 9,376 products had 100% valid-price coverage and zero duplicate identity/
+canonical-URL evidence, with no observed 429 or 5xx response. TubbysTubby's owner-provided
+canonical host is a parked/non-catalog site and fails safely. BuyBlox fails as
+`temporary_network`, consistent with its current certificate-chain problem; TLS validation
+was not bypassed. See `docs/COMPETITOR_COVERAGE.md`.
+
+Dependency review reduced npm audit from 13 advisories (1 critical, 5 high) to 4 (1 low,
+3 moderate, zero critical/high) using compatible explicit upgrades. The remaining React
+Router advisories require a deliberate v7 migration and concern redirect/SSR surfaces not
+used by this fixed-route client-only SPA.
+
 ## 3. Phase 1B.2 outcome
 
 Sync now has one provider-neutral business lifecycle:
@@ -158,9 +197,10 @@ results, and lineage; GitHub Actions is only the initial execution provider.
 - Partial/truncated, suspicious-empty, and failed acquisitions never infer absence.
 - Observed items in a partial result may still update when their external observation is
   newer.
-- A full fifth Shopify page (`5 × 250 = 1,250`) is conservatively `partial`, because a
-  sixth page may exist. Salla/generic adapters also signal a cap when pagination indicates
-  more data.
+- A full final Shopify page at the configured ceiling is conservatively `partial`, because
+  another page may exist. The historical five-page example was `5 × 250 = 1,250`;
+  Phase 1F raises the default safety ceiling to 100. Salla/generic adapters also signal a
+  cap when pagination indicates more data.
 - `Product.last_observed_at` and `last_observed_run_id` guard current state. Adapters stamp
   trusted server time at each page/batch or individual product-page boundary; acquisition
   completion is only a fallback. Run ID is the deterministic equal-time tie-break. An
@@ -254,7 +294,7 @@ used.
 
 | Gate | Result |
 |---|---|
-| Full backend | **221 passed**, 11 pre-existing warnings, against disposable local PostgreSQL |
+| Full backend | **237 passed**, 11 pre-existing warnings, against disposable local PostgreSQL |
 | Critical path | **143 passed**, 78 deselected, against disposable local PostgreSQL |
 | Phase 1C Search | **39 passed**: 35 PostgreSQL critical + 4 pure cycle-policy |
 | Phase 1D Export + cycle policy | **28 passed**: 24 PostgreSQL critical + 4 pure policy |
@@ -265,10 +305,15 @@ used.
 | Completeness safety selection | **5 passed** |
 | Fresh / prior-`0004` upgrade | both reached `0005` head |
 | Alembic drift | `No new upgrade operations detected` |
-| Preview/security release gate | **9 passed** |
+| Preview/security release gate | **11 passed**, including seed schema/content ownership preflight |
 | Frontend tests | **19 passed** with Vitest + Testing Library (9 Search + 8 Export + 2 Competitors) |
 | Frontend typecheck/build | pass; 2,417 modules; route-split entry 209.08 kB and largest lazy route 388.72 kB |
-| Startup/workflow | strict startup passes with 36 routes; 4 YAML/security tests pass |
+| Strict startup | passes against fresh migrated PostgreSQL with 36 routes |
+| Phase 1F backend acceptance | **14 passed**, including the migrated PostgreSQL morning journey |
+| Phase 1F browser acceptance | **14 passed**, 4 intentional cross-viewport matrix duplicates skipped; desktop/tablet/mobile |
+| Workflow security | **5 passed**; manual live smoke has no secret, DB, schedule, PR, or push path |
+| Live competitor coverage | **10 healthy / 2 failed**; 9,376 products across healthy stores; Shopbloxs and BloxCrew GraphQL healthy |
+| Dependency audit | **4 advisories**: 1 low, 3 moderate, **0 high/critical** |
 
 Known pre-existing warnings remain: Pydantic class-based config, FastAPI `on_event`, the
 custom pytest-asyncio loop fixture, Starlette's multipart import, React Router v7 future
@@ -281,7 +326,7 @@ route-level splitting. Frontend lint is not an available gate because ESLint is 
   inactivity. Manual runner startup also has queue/setup latency.
 - A manual run that enters `retry_wait` may need a later manual or scheduled invocation;
   PostgreSQL preserves it, but GitHub Actions is not a persistent poller.
-- Completeness depends on adapter evidence. The fifth-full-page rule is conservative, but
+- Completeness depends on adapter evidence. The final-full-page rule is conservative, but
   a storefront that silently truncates without pagination evidence can still be misread.
 - Notifications remain legacy and are not yet transactional/outbox-backed. Sync success is
   intentionally independent of Discord delivery.
@@ -302,14 +347,23 @@ route-level splitting. Frontend lint is not an available gate because ESLint is 
 - Export remains a synchronous request. A slow provider can still meet the existing adapter
   timeout but exceed an eventual deployment request ceiling; production proof must exercise
   a bounded known collection.
+- BuyBlox currently fails safe as `temporary_network`; do not disable certificate validation
+  to make it green. TubbysTubby's canonical host currently serves no catalog. Production
+  coverage is therefore incomplete even apart from the existing Case B- database blockers.
+- Public Storefront-token discovery remains an explicit legal/ToS and false-positive risk.
+  Phase 1F added a narrow adjacent-endpoint pattern but retained the older hex fallback;
+  see `docs/SECURITY.md` §1.5.
+- React Router v6 retains three moderate audit findings. A v7 upgrade is a separately tested
+  migration, not a safe lockfile-only patch.
 
 ## 9. Next recommended task
 
-The owner should complete the five-part Preview checklist in `docs/PREVIEW_TESTING.md`:
-Search, Exports, Competitors/Sync, desktop fit, and mobile fit. Capture focused feedback and
-make only evidence-backed Preview corrections. Do not begin Phase 1F, merge to `main`, change
-Production configuration/data, or start the production release-unblock runbook without new
-authorization.
+After final protected-Preview smoke, the owner should complete the five-part checklist in
+`docs/PREVIEW_TESTING.md`: Search, Exports, Competitors/Sync, desktop fit, and mobile fit.
+The Production recommendation is **HOLD**: resolve the documented Case B- database release
+blockers and the BuyBlox/TubbysTubby coverage gaps before considering rollout. Do not merge
+to `main`, change Production configuration/data, or start the release-unblock runbook
+without new authorization.
 
 ## 10. Decisions not to reverse
 
@@ -320,7 +374,8 @@ authorization.
 5. Actual external observation time orders product state; run start is not freshness.
 6. Claims require a committed lease and fencing token; no transaction spans acquisition.
 7. `DB_SCHEMA_CHECK=warn` remains until production is verified and migrated.
-8. No live network calls in tests or CI and no secrets in logs, fixtures, or docs.
+8. No live network calls in deterministic tests or required push/PR CI, and no secrets in
+   logs, fixtures, artifacts, or docs. Manual observational coverage is the only exception.
 9. `archive/pre-v2-rearchitecture` must not be changed.
 10. Preserve Git author identity and do not add AI attribution trailers.
 11. Search never hides degraded observations or promotes them to the reliable market
@@ -341,4 +396,5 @@ cd frontend
 npx tsc --noEmit
 npm run build
 npm run test:run
+npm run test:e2e
 ```

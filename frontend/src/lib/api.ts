@@ -141,7 +141,7 @@ export const prepareCollectionExport = async (
   const extension = params.format === 'jsonl' ? 'jsonl' : params.format
   return {
     blob: response.data,
-    filename: exportFilename(response.headers, `collection-prices.${extension}`),
+    filename: exportFilename(response.headers['content-disposition'], `collection-prices.${extension}`),
     provenance: parseCollectionExportProvenance(response.headers),
   }
 }

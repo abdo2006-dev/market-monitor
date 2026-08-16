@@ -38,7 +38,7 @@ def _guard_preview_target() -> str:
 os.environ["DATABASE_URL"] = _guard_preview_target()
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sqlalchemy import delete, select  # noqa: E402
+from sqlalchemy import delete, func, select, text  # noqa: E402
 
 from app.database import AsyncSessionLocal  # noqa: E402
 from app.domain.product_identity import (  # noqa: E402
@@ -53,6 +53,44 @@ from app.models import (  # noqa: E402
     ScrapeRun,
 )
 from app.utils.text_normalizer import normalize_title  # noqa: E402
+
+
+EXPECTED_SCHEMA_HEAD = "0005_durable_sync_lifecycle"
+EXPECTED_PREVIEW_COMPETITORS = 7
+
+
+async def _guard_preview_contents(session) -> None:
+    """Refuse DML unless this is an isolated, migrated fixture database.
+
+    Environment names are insufficient: local CLI tooling can fall back to a
+    different environment file. Verify durable schema and database contents
+    before the first DELETE/INSERT. Empty initialization requires an additional
+    one-time flag; normal refresh requires exactly the seven marker-owned rows
+    and no unrelated competitors.
+    """
+    version = await session.scalar(text("SELECT version_num FROM alembic_version"))
+    if version != EXPECTED_SCHEMA_HEAD:
+        raise RuntimeError("Refusing to seed: preview schema is not at expected head")
+
+    total = await session.scalar(select(func.count()).select_from(Competitor)) or 0
+    marked = await session.scalar(
+        select(func.count()).select_from(Competitor).where(
+            Competitor.notes == PREVIEW_MARKER
+        )
+    ) or 0
+    refreshing_fixture = (
+        total == EXPECTED_PREVIEW_COMPETITORS
+        and marked == EXPECTED_PREVIEW_COMPETITORS
+    )
+    initializing_empty = (
+        total == 0
+        and marked == 0
+        and os.environ.get("PREVIEW_ALLOW_INITIALIZE_EMPTY", "").lower() == "true"
+    )
+    if not (refreshing_fixture or initializing_empty):
+        raise RuntimeError(
+            "Refusing to seed: database is not the isolated preview fixture set"
+        )
 
 
 async def _make_run(session, competitor: Competitor, *, status: str, completeness: str,
@@ -179,6 +217,7 @@ async def seed() -> None:
     ]
 
     async with AsyncSessionLocal() as session:
+        await _guard_preview_contents(session)
         existing_ids = (
             await session.execute(select(Competitor.id).where(Competitor.notes == PREVIEW_MARKER))
         ).scalars().all()

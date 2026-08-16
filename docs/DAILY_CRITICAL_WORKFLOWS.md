@@ -279,7 +279,8 @@ increment `consecutive_misses` and deactivate at 3.
   final expired attempt becomes `abandoned` with a safe failure event.
 - Complete, newer coverage may increment misses. Partial/truncated, suspicious-empty, and
   failed results never count unobserved products as absent.
-- Exactly 1,250 products across five full Shopify pages is `partial`, not complete.
+- Exactly 1,250 products across a configured five-page Shopify request is `partial`, not
+  complete.
 - Current price ordering uses server-captured page/batch `observed_at`, then run ID for
   ties. An earlier observation cannot become newer merely because its acquisition returns
   later; a wholly older complete acquisition is terminal `stale_skipped`.
@@ -438,7 +439,8 @@ sanitized output remains outside the repository.
 Eleven competitors used Shopify HTTP acquisition and one used Salla HTTP acquisition.
 Every non-empty competitor completed in under ten seconds. Shopbloxs returned empty after
 eight HTTP requests and would be rejected by normal Sync. Three competitors returned
-exactly 1,250 products (`5 pages * 250`), so they may be truncated; topology evidence must
+exactly 1,250 products (`5 pages * 250`) at that benchmark's explicit ceiling, so they may
+be truncated; topology evidence must
 not be mistaken for completeness evidence. This was one acquisition-only run and excludes
 reconciliation, notification, and cold runner setup.
 

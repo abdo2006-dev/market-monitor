@@ -1,20 +1,27 @@
 # Testing
 
-> **Phase 1E update.** Sections 1–3 below describe historical gaps at the Phase 0
+> **Phase 1F update.** Sections 1–3 below describe historical gaps at the Phase 0
 > baseline. Phase 1A/1B.1 added daily-path and product-integrity coverage, Phase 1B.2 added
 > a real PostgreSQL lifecycle suite, Phase 1C adds Search trust, and Phase 1D adds Export
 > provenance plus frontend behavior. Phase 1E adds production-rollout safety-gate tests,
+> and Phase 1F adds deterministic acquisition/workflow acceptance plus real-browser gates,
 > so several "not covered" claims are now out of date. Current state: **§0** and
 > `docs/DAILY_CRITICAL_WORKFLOWS.md` §9. The target pyramid in §4 is unchanged and still
 > the plan.
 
 ---
 
-## 0. Current state (Phase 1E pre-rollout gate)
+## 0. Current state (Phase 1F acceptance gate)
 
-The Phase 1E gate is **215 passed** against migrated PostgreSQL: 73 non-critical cases and
-142 critical cases. The focused lifecycle suite contains 34 cases. The frontend has 16
-daily-workflow behavior tests (8 Search and 8 Export).
+The exact full-suite count is recorded after every release run in `docs/PROJECT_STATUS.md`.
+Phase 1F adds two explicit acceptance layers:
+
+- `backend/tests/acceptance/`: deterministic, fixture-backed acquisition contracts plus a
+  real-PostgreSQL Sync → Search → cached/live Export morning journey. Marker: `acceptance`.
+- `frontend/e2e/acceptance.spec.ts`: API-intercepted Chromium journeys at 1440×900,
+  1024×768, and 390×844. It parses real browser downloads and checks truthful Sync 202,
+  Search trust, Export provenance/failures, keyboard navigation, Escape, reduced motion,
+  console errors, and horizontal overflow.
 
 ```bash
 docker run -d --rm --name mm_pg -e POSTGRES_USER=market -e POSTGRES_PASSWORD=market -e POSTGRES_DB=market_monitor -p 5432:5432 postgres:16-alpine
@@ -32,7 +39,8 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:543
 |---|---|---|
 | `tests/test_core.py` | 65 | pure helpers (unchanged from Phase 0) |
 | `tests/test_search_trust.py` | 4 | Cairo-cycle boundary, current/stale coverage, out-of-stock price eligibility |
-| `tests/test_sync_workflow_release_gate.py` | 4 | Cairo-local schedules, default-off automation, safe triggers, environment-scoped secrets, pinned trusted actions, minimum permissions |
+| `tests/test_sync_workflow_release_gate.py` | 5 | Cairo-local schedules, default-off automation, safe triggers, environment-scoped secrets, manual live-smoke isolation, pinned trusted actions, minimum permissions |
+| `tests/acceptance/` | 14 | fixture-backed acquisition contracts and one migrated-PostgreSQL Sync → Search → Export morning journey |
 | `tests/critical/test_schema_authority.py` | 12 | Alembic authority, real B- fingerprint, credential-safe classifier failure |
 | `tests/critical/test_sync_regression.py` | 32 | reconciliation, idempotency, failure, concurrency, stale ordering |
 | `tests/critical/test_product_integrity.py` | 5 | identity semantics, database constraints, duplicate audit/consolidation |
@@ -40,7 +48,7 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:543
 | `tests/critical/test_search_regression.py` | 35 | matching and guarded fallback, grouping, typed contract, trust states, currencies, reliable/observed summaries, snapshots, active Sync |
 | `tests/critical/test_export_regression.py` | 24 | live/cached mode truth, completeness, safe failures, provenance, compatibility, URL safety, lineage |
 
-Harness: `tests/conftest.py`. Marker: `-m critical` / `-m "not critical"`.
+Harness: `tests/conftest.py`. Markers: `critical`, `acceptance`, and their negations.
 
 **Database-backed tests skip when `TEST_DATABASE_URL` is unset.** That is correct locally
 and unacceptable in CI, so CI sets it and additionally fails if a skip is detected. The
@@ -59,8 +67,11 @@ Frontend `src/pages/MarketSearch.test.tsx` and `src/pages/Exports.test.tsx` use 
 Testing Library for daily Search and Export loading/success/degradation/failure states and
 truthful operator actions. Run them with `npm run test:run`.
 
-**Still missing**: backend lint/type checking, browser E2E automation in CI, and
-integration coverage for the Dashboard/Activity/notification paths. `npm run lint` remains
+Playwright is now a required deterministic CI gate. The separate manual live coverage
+runner is intentionally not a test and not blocking; see `docs/COMPETITOR_COVERAGE.md`.
+
+**Still missing**: backend lint/type checking and integration coverage for the
+Dashboard/Activity/notification paths. `npm run lint` remains
 broken — eslint is declared in `package.json` but not installed.
 
 ---
@@ -190,8 +201,9 @@ In CI, on a clean database:
 3. `alembic revision --autogenerate` produces an **empty** diff — models and migrations
    agree.
 
-Check 3 fails today (`docs/ARCHITECTURE.md` A-1) and must be made to pass before it can be
-enforced. Until then it runs as a reporting step, not a gate.
+All three checks are enforced in CI. The historical drift described by
+`docs/ARCHITECTURE.md` A-1 was resolved in Phase 1A; any generated Alembic operation now
+fails the build.
 
 ### 4.4 Scraper contract tests — deterministic fixtures only
 
@@ -203,10 +215,37 @@ Shopify fix must not silently break Salla or generic scraping.
 - Per-adapter fixture directories under `tests/fixtures/scrapers/<adapter>/`.
 - Shopify fallback-ordering tests (products.json 403 → httpx path → `strategy_used`).
 
-**Absolute rule: no test may make a live network request.** The HTTP client is injected,
+**Absolute rule: no deterministic test or required CI gate may make a live storefront
+request.** The HTTP client is injected,
 so fixtures are supplied by construction rather than by monkeypatching. This is a
 correctness requirement, a speed requirement, and an acceptable-behaviour requirement —
-CI must never scrape a third-party storefront.
+push/PR CI must never scrape a third-party storefront.
+
+The only exception is the explicitly manual, observational GitHub Actions workflow
+`competitor-coverage-smoke.yml`. It imports no database models, receives no database or
+application secrets, never runs on push/pull request/schedule, and does not fail merely
+because a provider is degraded. It is operational evidence, not test input.
+
+### 4.4.1 Phase 1F commands
+
+```bash
+cd backend
+TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:5432/market_monitor_test \
+  .venv/bin/python -m pytest tests/acceptance/ -q
+```
+
+```bash
+cd frontend
+npm run test:run
+npm run test:e2e
+npx tsc --noEmit
+npm run build
+```
+
+The browser suite installs Chromium with `npx playwright install chromium` locally; CI
+uses `npx playwright install --with-deps chromium`. Failure traces, screenshots, and the
+HTML report are short-retention sanitized CI artifacts. They contain only synthetic API
+fixtures and must never record a signed-in or production session.
 
 Fixtures are captured from real responses once, trimmed to the fields the parser reads,
 and **scrubbed of access tokens, cookies, and personal data** before committing.

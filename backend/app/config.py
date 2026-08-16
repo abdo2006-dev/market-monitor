@@ -13,7 +13,10 @@ class Settings(BaseSettings):
     USER_AGENT: str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     PLAYWRIGHT_HEADLESS: bool = True
     DEFAULT_SCAN_INTERVAL_MINUTES: int = 60
-    DEFAULT_MAX_PAGES: int = 5
+    # Catalog adapters stop when the provider proves there is no next page.
+    # This is only a safety ceiling for unexpectedly large or looping sources:
+    # 100 Shopify pages is at most 25,000 raw products per acquisition.
+    DEFAULT_MAX_PAGES: int = 100
     DEFAULT_PAGE_DELAY_SECONDS: float = 2.0
     DAILY_SUMMARY_ENABLED: bool = True
     DAILY_SUMMARY_TIME: str = "08:00"

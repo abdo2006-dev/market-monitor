@@ -127,6 +127,11 @@ async def acquire_catalog(competitor: dict, **scrape_options) -> AcquisitionResu
         completeness=completeness,
         page_cap_reached=page_cap_reached,
         completeness_reason=reason,
+        warnings=tuple(
+            str(value)[:120]
+            for value in telemetry.get("warnings", [])
+            if isinstance(value, str)
+        ),
     )
 
 

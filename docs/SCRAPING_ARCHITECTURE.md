@@ -7,7 +7,10 @@ persisted result. Part 2 defines the V2 adapter contract and scan lifecycle.
 
 # Part 1 — Current implementation
 
-All of it lives in one file: `backend/app/services/scraper.py` (1,195 lines).
+The legacy multi-platform implementation remains concentrated in
+`backend/app/services/scraper.py`; durable lifecycle ownership and telemetry wrapping live
+in `application/sync.py` and `domain/acquisition.py`. Historical line references below are
+navigation hints, not an API contract.
 
 ## 1.1 Dispatch
 
@@ -38,15 +41,19 @@ Returns `list[dict]`. The shape is undeclared and unvalidated. Keys produced:
 
 **1. Storefront GraphQL, if `prefer_storefront_graphql`** (`:156` → `:372`)
 
-Requires a shop domain, an access token, and collection handles. If not configured, it
-attempts to *discover* them (see §1.3). Queries `collection(handle:)` with cursor
-pagination, 250 per page, capped at `max_products` (default 500).
+Requires a shop domain and public Storefront token. If not configured, it attempts to
+*discover* them (see §1.3). With collection handles it queries `collection(handle:)`;
+without handles it queries the root `products` connection. Both use cursor pagination,
+250 per page, and the shared validated page ceiling.
 
 **2. `/products.json` via aiohttp** (`:161` → `:205`)
 
 If `include_all_products` and `prefer_all_products_first` (both default true), fetches
-`{base_url}/products.json?limit=250&page=N` for N in 1..max_pages. Stops on empty page,
-HTTP ≥ 400, or any exception. Uses a certifi SSL context (`:355`).
+`{base_url}/products.json?limit=250&page=N` for N in 1..max_pages. The Phase 1F default is
+100 pages (a hard ceiling, not a target); normal acquisition stops on a short/empty page.
+Repeated pages, malformed payloads, cap exhaustion, and mid-catalog failures emit safe
+partial/failure telemetry rather than claiming complete coverage. Uses a certifi SSL
+context (`:355`).
 
 **3. `/products.json` via httpx** (`:202` → `:233`)
 
@@ -97,8 +104,8 @@ then fetch each product page with `asyncio.Semaphore(10)` and parse it.
 price (`price:$R[\d+]={amount:"..."`), currency, image (`cdn.shopify.com` URLs),
 `gid://shopify/Product/(\d+)`, and an `availableForSale:(!0|!1)` minified-boolean probe.
 
-Default cap: `max(max_pages * 250, 250)` products. At the default `max_pages=5` that is
-1,250 individual page fetches for one competitor.
+Default cap: `max(max_pages * 250, 250)` products. At the Phase 1F default ceiling of 100,
+that is a 25,000-product safety bound; normal sitemap exhaustion ends earlier.
 
 ## 1.5 Salla
 
@@ -276,7 +283,8 @@ Short transactions, none spanning network I/O:
 ### Completeness evidence
 
 The current adapters populate telemetry without exposing secret URLs or tokens. Shopify's
-fifth full 250-item page is conservatively partial (`page_cap_reached=true`). Salla uses a
+final full 250-item page at the configured ceiling is conservatively partial
+(`page_cap_reached=true`). Salla uses a
 remaining cursor at its cap; generic pagination uses an available next-page control at its
 cap. An unexpected zero is `suspicious_empty` unless `allow_empty_catalog=true`. A
 telemetry-proven HTTP/network failure raises `AcquisitionFailure` instead of masquerading
@@ -290,8 +298,11 @@ whole-acquisition completion is only a fallback. Product update ordering is
 ## 2.2 Adapter contract (partially implemented)
 
 Phase 1B.2 introduced the concrete immutable `AcquisitionResult` boundary around the
-existing scraper. The fully split adapters/injected HTTP client below remain the target;
-do not describe them as current code.
+existing scraper. Phase 1F adds fixture-backed contract coverage for the legacy boundary,
+including long Shopify pagination, duplicate/malformed pages, root-products GraphQL,
+Salla cursors, sitemap, generic observations, and sanitized failure evidence. The fully
+split adapters/injected HTTP client below remain the target; do not describe them as
+current code.
 
 ```python
 class ScraperAdapter(Protocol):
@@ -421,7 +432,12 @@ are then frozen — a fixture change requires an explicit justification in revie
    are the tests that would have caught the regressions behind commits `4a6adea`,
    `f080dc0`, and `f346f70`.
 
-**No test in any layer may perform a live network request.** The `http` port is injected
-with a fixture-backed fake. CI must never touch a real storefront — for correctness, for
-speed, and because scraping a third party from shared CI infrastructure is not acceptable
-behaviour.
+**No deterministic test or required CI gate may perform a live network request.** The
+`http` port is injected with a fixture-backed fake. Push/PR CI must never touch a real
+storefront — for correctness, for speed, and because scraping a third party from shared
+CI infrastructure is not acceptable behaviour.
+
+The separate manual `app.diagnostics.live_coverage` runner is an observational operations
+tool, not a test. It is sequential, database-free, sanitized, and isolated from push/PR
+CI. Its canonical registry and status semantics are documented in
+`docs/COMPETITOR_COVERAGE.md`.

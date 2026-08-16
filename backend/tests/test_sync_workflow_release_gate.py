@@ -10,6 +10,7 @@ WORKFLOW_DIR = Path(__file__).parents[2] / ".github" / "workflows"
 SYNC_WORKFLOW = WORKFLOW_DIR / "sync-v2.yml"
 MIGRATION_WORKFLOW = WORKFLOW_DIR / "db-migrate.yml"
 CI_WORKFLOW = WORKFLOW_DIR / "ci.yml"
+COVERAGE_WORKFLOW = WORKFLOW_DIR / "competitor-coverage-smoke.yml"
 
 
 def _workflow(path: Path = SYNC_WORKFLOW) -> dict:
@@ -91,3 +92,25 @@ def test_ci_workflow_has_minimum_permissions_and_pinned_actions():
         assert re.fullmatch(
             rf"actions/{setup_action}@[0-9a-f]{{40}}", setup["uses"]
         )
+
+
+def test_live_coverage_workflow_is_manual_read_only_and_pinned():
+    workflow = _workflow(COVERAGE_WORKFLOW)
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    assert workflow["permissions"] == {"contents": "read"}
+
+    job = workflow["jobs"]["coverage"]
+    assert "environment" not in job
+    serialized = COVERAGE_WORKFLOW.read_text().lower()
+    assert "secrets." not in serialized
+    assert "database_url" not in serialized
+    assert "schedule:" not in serialized
+    assert "pull_request" not in serialized
+    assert "--fail-on-unhealthy" not in serialized
+
+    checkout, setup = job["steps"][:2]
+    assert checkout["with"]["persist-credentials"] is False
+    assert re.fullmatch(r"actions/checkout@[0-9a-f]{40}", checkout["uses"])
+    assert re.fullmatch(r"actions/setup-python@[0-9a-f]{40}", setup["uses"])
+    upload = job["steps"][-1]
+    assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", upload["uses"])

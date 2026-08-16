@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.config import settings
@@ -77,3 +79,17 @@ async def test_preview_fixture_cannot_activate_in_production(monkeypatch):
     assert called is True
     assert result.strategy == "production-adapter"
     assert result.product_count == 1
+
+
+def test_preview_seed_verifies_schema_and_fixture_ownership_before_dml():
+    source = (
+        Path(__file__).parents[1] / "scripts" / "seed_preview_demo.py"
+    ).read_text()
+    guard_call = source.index("await _guard_preview_contents(session)")
+    first_delete = source.index("delete(Competitor)")
+
+    assert guard_call < first_delete
+    assert 'EXPECTED_SCHEMA_HEAD = "0005_durable_sync_lifecycle"' in source
+    assert "EXPECTED_PREVIEW_COMPETITORS = 7" in source
+    assert "PREVIEW_ALLOW_INITIALIZE_EMPTY" in source
+    assert "database is not the isolated preview fixture set" in source

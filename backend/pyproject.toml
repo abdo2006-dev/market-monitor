@@ -32,4 +32,5 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "critical: daily critical path (Search, Export, Sync) regression coverage",
+    "acceptance: deterministic Phase 1F workflow and acquisition acceptance",
 ]

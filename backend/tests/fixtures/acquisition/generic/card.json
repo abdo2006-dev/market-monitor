@@ -1,0 +1,11 @@
+{
+  "title": "Batwing",
+  "price": 12.34,
+  "currency": "USD",
+  "url": "https://generic.example.invalid/item/batwing",
+  "image_url": null,
+  "stock_status": "in_stock",
+  "sku": "FIX-GENERIC-BATWING",
+  "external_id": null,
+  "category": "Murder Mystery 2"
+}

@@ -1,0 +1,25 @@
+{
+  "data": {
+    "products": {
+      "edges": [{
+        "cursor": "fixture-cursor",
+        "node": {
+          "id": "gid://shopify/Product/101",
+          "title": "Batwing",
+          "handle": "batwing",
+          "vendor": "Fixture Store",
+          "productType": "Murder Mystery 2",
+          "images": {"edges": [{"node": {"url": "https://cdn.example.invalid/batwing.png", "altText": "Batwing"}}]},
+          "variants": {"edges": [{"node": {
+            "id": "gid://shopify/ProductVariant/201",
+            "sku": "FIX-BATWING",
+            "availableForSale": true,
+            "price": {"amount": "12.34", "currencyCode": "USD"},
+            "compareAtPrice": null
+          }}]}
+        }
+      }],
+      "pageInfo": {"hasNextPage": false, "endCursor": "fixture-cursor"}
+    }
+  }
+}
