@@ -5,6 +5,7 @@ type MockOptions = {
   compareFailure?: boolean
   noReliable?: boolean
   exportState?: 'complete' | 'partial' | 'suspicious_empty' | 'failure'
+  authRequired?: boolean
 }
 
 const competitor = {
@@ -281,10 +282,20 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
 }
 
 async function installApi(page: Page, options: MockOptions = {}) {
+  let authenticated = !options.authRequired
   await page.route('**/api/**', async route => {
     const request = route.request()
     const url = new URL(request.url())
     const path = url.pathname
+    if (path === '/api/auth/status') return fulfillJson(route, { enabled: Boolean(options.authRequired), authenticated })
+    if (path === '/api/auth/login' && request.method() === 'POST') {
+      if (request.postDataJSON()?.password !== 'preview-secret') {
+        return fulfillJson(route, { detail: 'Invalid credentials' }, 401)
+      }
+      authenticated = true
+      return fulfillJson(route, { enabled: true, authenticated: true })
+    }
+    if (options.authRequired && !authenticated) return fulfillJson(route, { detail: 'Authentication required' }, 401)
     if (path === '/api/competitors') return fulfillJson(route, [competitor, { ...competitor, id: 2, name: 'Beta Market', base_url: 'https://beta.example', last_scan_status: 'partial' }])
     if (path === '/api/sync/freshness') return fulfillJson(route, [
       { competitor_id: 1, competitor_name: 'Alpha Market', coverage_complete: true, last_complete_at: '2026-08-16T07:30:00Z', latest_partial_at: null, last_failed_at: null, active_run: null },
@@ -324,6 +335,20 @@ async function installApi(page: Page, options: MockOptions = {}) {
     return fulfillJson(route, { detail: `Unhandled deterministic fixture route: ${path}` }, 404)
   })
 }
+
+test('Production login gate blocks workspace data until authentication', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-1440', 'One browser covers the shared authentication gate')
+  const consoleErrors = watchConsole(page)
+  await installApi(page, { authRequired: true })
+  await page.goto('/search')
+  await expect(page.getByRole('heading', { name: 'Market Monitor' })).toBeVisible()
+  await expect(page.getByRole('combobox', { name: 'Search products' })).toHaveCount(0)
+  const password = page.getByLabel('Workspace password')
+  await password.fill('preview-secret')
+  await page.getByRole('button', { name: 'Open workspace' }).click()
+  await expect(page.getByRole('combobox', { name: 'Search products' })).toBeVisible()
+  expect(consoleErrors).toEqual([])
+})
 
 function watchConsole(page: Page) {
   const errors: string[] = []

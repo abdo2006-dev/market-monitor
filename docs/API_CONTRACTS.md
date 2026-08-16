@@ -7,6 +7,21 @@ explicit durable Sync contracts in §1.1 and makes them the frontend authority.
 
 ## 1. Route inventory
 
+### 1.0 Production authentication
+
+When `APP_AUTH_ENABLED=true`, all data and mutation routes require the signed HttpOnly
+session cookie. Cross-origin CORS is disabled, and `POST`/`PUT`/`PATCH`/`DELETE` additionally
+require `X-Market-Monitor-CSRF: 1`. Cron routes use their separate fail-closed bearer secret.
+
+| Method | Path | Response model | Semantics |
+|---|---|---|---|
+| GET | `/api/auth/status` | `AuthStatus` | Public safe check: only `enabled` and `authenticated` |
+| POST | `/api/auth/login` | `AuthStatus` | Verifies the server-side password hash and sets the secure session cookie |
+| POST | `/api/auth/logout` | `AuthStatus` | Requires session + CSRF header and expires the cookie |
+
+No response exposes the password hash, signing secret, session token, GitHub token, cron
+secret, or database credential. `/health` remains public and reports no protected data.
+
 The table below is the Phase 0 inventory. New Sync V2 routes follow it.
 
 | Method | Path | Handler | `response_model` |

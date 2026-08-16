@@ -13,11 +13,31 @@ import type {
   SyncRequestStatus,
   SyncRunStatus,
   SearchSuggestionsResponse,
+  AuthStatus,
 } from './types'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || '/api',
+  withCredentials: true,
+  headers: { 'X-Market-Monitor-CSRF': '1' },
 })
+
+api.interceptors.response.use(
+  response => response,
+  error => {
+    if (error?.response?.status === 401) {
+      window.dispatchEvent(new Event('market-monitor:auth-required'))
+    }
+    return Promise.reject(error)
+  },
+)
+
+export const getAuthStatus = (): Promise<AuthStatus> =>
+  api.get('/auth/status').then(response => response.data)
+export const login = (password: string): Promise<AuthStatus> =>
+  api.post('/auth/login', { password }).then(response => response.data)
+export const logout = (): Promise<AuthStatus> =>
+  api.post('/auth/logout').then(response => response.data)
 
 // Competitors
 export const getCompetitors = (): Promise<Competitor[]> =>

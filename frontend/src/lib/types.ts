@@ -385,3 +385,7 @@ export interface CollectionExportRow {
   observed_run_id?: number | null
   coverage_state?: SearchCoverageState | null
 }
+export type AuthStatus = {
+  enabled: boolean
+  authenticated: boolean
+}

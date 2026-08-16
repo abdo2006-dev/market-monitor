@@ -45,6 +45,24 @@ button, a { -webkit-tap-highlight-color: transparent; }
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 ::selection { background: rgba(96, 165, 250, .28); }
 
+.auth-screen { display: grid; min-height: 100vh; align-content: center; justify-items: center; gap: 18px; padding: 28px 18px; background: radial-gradient(circle at 50% 0%, rgba(50, 104, 168, .18), transparent 38%), var(--bg); }
+.auth-card { width: min(100%, 430px); padding: 34px; border: 1px solid var(--border); border-radius: 20px; background: linear-gradient(160deg, rgba(22, 30, 43, .98), rgba(13, 18, 27, .98)); box-shadow: 0 28px 80px rgba(0, 0, 0, .36); }
+.auth-brand { display: grid; width: 42px; height: 42px; margin-bottom: 24px; place-items: center; border: 1px solid rgba(96, 165, 250, .36); border-radius: 12px; background: var(--accent-soft); color: #9ac7fb; }
+.auth-eyebrow { display: flex; align-items: center; gap: 6px; color: #8ba0b7; font-size: 10px; font-weight: 760; letter-spacing: .12em; text-transform: uppercase; }
+.auth-card h1 { margin: 7px 0 0; font-size: 30px; letter-spacing: -.035em; }
+.auth-form { display: grid; gap: 17px; margin-top: 24px; }
+.auth-form > p { margin: 0 0 2px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.auth-password-field { position: relative; display: flex; align-items: center; }
+.auth-password-field > svg { position: absolute; left: 12px; z-index: 1; color: #697b8f; }
+.auth-password-field .ui-input { padding-left: 39px; }
+.auth-submit { width: 100%; min-height: 42px; }
+.auth-error { padding: 10px 12px; border: 1px solid rgba(239, 125, 131, .22); border-radius: 9px; background: var(--danger-soft); color: #f3a3a8; font-size: 12px; }
+.auth-checking { display: flex; align-items: center; gap: 9px; min-height: 130px; color: var(--muted); }
+.auth-message { display: grid; gap: 8px; margin-top: 22px; color: var(--muted); }
+.auth-message strong { color: var(--text-soft); }
+.auth-message .ui-button { margin-top: 10px; }
+.auth-footnote { margin: 0; color: #657588; font-size: 11px; }
+
 .app-shell { min-height: 100vh; background: radial-gradient(circle at 82% -10%, rgba(44, 88, 139, .12), transparent 30%), var(--bg); }
 .desktop-sidebar { position: fixed; inset: 0 auto 0 0; z-index: 50; display: flex; width: 236px; flex-direction: column; border-right: 1px solid rgba(52, 68, 90, .68); background: rgba(11, 15, 23, .96); backdrop-filter: blur(18px); }
 .app-main { min-width: 0; min-height: 100vh; margin-left: 236px; overflow: clip; }
@@ -64,6 +82,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .sidebar-foot > span:last-child { display: grid; }
 .sidebar-foot strong { color: var(--text-soft); font-size: 11px; font-weight: 650; }
 .sidebar-foot small { color: var(--muted); font-size: 10px; }
+.sidebar-lock { display: flex; align-items: center; justify-content: center; gap: 7px; margin: -8px 16px 16px; padding: 7px 10px; border: 0; background: transparent; color: #657588; font-size: 11px; cursor: pointer; }
+.sidebar-lock:hover { color: var(--text-soft); }
+.mobile-lock { width: calc(100% - 24px); margin: 22px 12px 0; min-height: 40px; border: 1px solid var(--border); border-radius: 9px; }
 .environment-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px rgba(72, 199, 142, .1); }
 .environment-dot.is-preview { background: var(--info); box-shadow: 0 0 0 4px rgba(134, 182, 246, .1); }
 

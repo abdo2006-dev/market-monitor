@@ -306,6 +306,14 @@ Do not treat local completion as production readiness. Check every box in order.
 
 **Vercel/application**
 
+- On plans where provider protection cannot cover the Production domain, configure the
+  built-in single-operator gate before deployment: generate `APP_AUTH_PASSWORD_HASH`
+  interactively with `backend/scripts/hash_auth_password.py`, generate an independent
+  32+ character `APP_AUTH_SESSION_SECRET`, set `APP_AUTH_ENABLED=true`, and keep all values
+  server-side. Verify anonymous direct API calls return 401, login sets a
+  Secure/HttpOnly/SameSite=Strict cookie, cross-origin or missing-CSRF mutations return
+  403, and logout expires the session. Never reuse the database, cron, or GitHub credential
+  as the workspace password/session secret.
 - Deploy code containing the V2 API only after the database is compatible. Start with
   `SYNC_EXECUTION_MODE=v2`, `SYNC_DISPATCH_PROVIDER=none`,
   `SYNC_MORNING_ENABLED=false`, and `DB_SCHEMA_CHECK=warn`.

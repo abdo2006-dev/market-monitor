@@ -858,8 +858,11 @@ async def test_compatibility_cron_cannot_create_automatic_v2_work_while_disabled
     await db_session.commit()
     monkeypatch.setattr(settings, "SYNC_EXECUTION_MODE", "v2")
     monkeypatch.setattr(settings, "SYNC_MORNING_ENABLED", False)
+    monkeypatch.setattr(settings, "CRON_SECRET", "test-cron-secret")
 
-    result = await scan_due(authorization=None, db=db_session)
+    result = await scan_due(
+        authorization="Bearer test-cron-secret", db=db_session
+    )
 
     request_count = await db_session.scalar(select(func.count(SyncRequest.id)))
     run_count = await db_session.scalar(select(func.count(ScrapeRun.id)))

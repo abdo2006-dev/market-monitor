@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+import secrets
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +14,12 @@ router = APIRouter(prefix="/api/cron", tags=["cron"])
 
 
 def _check_auth(authorization: str | None):
-    if settings.CRON_SECRET and authorization != f"Bearer {settings.CRON_SECRET}":
+    expected = f"Bearer {settings.CRON_SECRET}" if settings.CRON_SECRET else None
+    if (
+        expected is None
+        or authorization is None
+        or not secrets.compare_digest(authorization, expected)
+    ):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 

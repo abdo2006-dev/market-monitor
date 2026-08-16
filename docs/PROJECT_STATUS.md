@@ -3,28 +3,49 @@
 **Read this first.** This is the handoff file between working sessions. If it is stale,
 fix it as part of the task.
 
-_Last updated: 2026-08-16, Phase 1F deterministic acceptance and live coverage gate complete; Production rollout remains blocked._
+_Last updated: 2026-08-16, Phase 1G controlled Production release in progress; no Production write or deployment has occurred._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Phase 1F acceptance complete; protected Preview closeout in progress** — deterministic acquisition/morning-workflow/browser gates are enforced, and the 12-storefront live matrix is documented. Production remains Case B- with duplicates and is not recommended for rollout. |
+| **Current phase** | **Phase 1G controlled Production release** — immutable source/ancestry checks and the complete local release suite pass. A minimal single-user access gate is implemented on the release branch because the current Vercel Hobby plan cannot protect Production domains. Production remains stopped at the provider-native recovery-object gate. |
 | **Phase 1D base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` (Phase 1C checkpoint) |
 | **Phase 1C base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` |
 | **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
 | **Working branch** | `preview/market-monitor-v2` |
 | **Migration head** | `0005_durable_sync_lifecycle` |
 | **Archive baseline** | `archive/pre-v2-rearchitecture` → `f346f70`; do not move or delete. |
-| **Production** | Current Vercel credential completed trusted-TLS read-only classification/audits. Schema is B-; 12 logical duplicate groups affect 24 products and 117 history rows. Nothing was migrated, consolidated, dispatched, deployed, merged, pushed, or reconfigured. |
+| **Production** | Current Vercel credential completed trusted-TLS read-only classification/audits. Schema is B-; 12 logical duplicate groups affect 24 products and 121 history rows (57 snapshots + 64 events). Nothing was migrated, consolidated, dispatched, deployed, merged, pushed, or reconfigured. |
 | **User-test Preview** | Vercel Preview is Ready on `preview/market-monitor-v2`, backed by isolated resource `market-monitor-v2-preview-db` at migration head with seven deterministic competitors and no runner. See `docs/PREVIEW_TESTING.md`. |
 
 Priority remains: P0 migration safety, P1 Sync, P2 Search, P3 Export, P4 daily-workflow
 UX, then lower-priority features. Treasury Audit remains design-only.
 
-The immediate next step is final protected-Preview deployment validation, followed by the
-owner's hands-on desktop and mobile checklist in `docs/PREVIEW_TESTING.md`. Nothing in
-Phase 1F authorizes a merge to `main`, a Production database write, or Production rollout.
+The Phase 1G owner authorization permits the bounded release runbook only after every hard
+gate passes. No Production database/configuration write, merge, or deployment has occurred
+yet. The deterministic validation, one permitted low-impact 12-store coverage run, and
+approved-credential read-only Production classification/audits are complete. The next step
+is to establish and independently read a Neon recovery object before any schema/data write.
+
+## 1.1 Phase 1G access-control gate (in progress)
+
+- Vercel API evidence identifies the project plan as Hobby. Current Vercel documentation
+  states Standard Protection excludes Production domains on that plan, so provider-level
+  protection cannot satisfy this release without a paid plan change.
+- `app.auth` therefore supplies the brief's application-level fallback: one PBKDF2 password
+  hash, independent HMAC session secret, expiring Secure/HttpOnly/SameSite=Strict cookie,
+  same-origin mutation checks, and no browser-visible infrastructure credential.
+- All data/mutation APIs are denied before routing when unauthenticated. Auth status/login
+  and health are the only public application paths; cron retains a distinct bearer and now
+  fails closed when its secret is absent.
+- The SPA renders only the login gate until session proof succeeds and exposes an explicit
+  lock action. Cross-origin API access is disabled.
+- The local release suite passes: 242 backend tests against disposable PostgreSQL, 19
+  frontend component tests, 15 Playwright cases (plus six intentional viewport skips),
+  TypeScript, production build, full downgrade/upgrade sequencing, Alembic drift, and
+  strict application import with 39 routes. Exact-checkpoint CI and the final staged secret
+  scan remain release gates before merge/deploy.
 
 ## 2. Phase 1C outcome
 

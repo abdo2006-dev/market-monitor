@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     GITHUB_ACTIONS_WORKFLOW: str = "sync-v2.yml"
     GITHUB_ACTIONS_REF: str = "main"
     CRON_SECRET: Optional[str] = None
+    # Single-operator application access gate. Production enables this and
+    # supplies only a password hash plus an independent session-signing secret.
+    APP_AUTH_ENABLED: bool = False
+    APP_AUTH_PASSWORD_HASH: Optional[str] = None
+    APP_AUTH_SESSION_SECRET: Optional[str] = None
+    APP_AUTH_SESSION_TTL_SECONDS: int = 43200
     # Preview-only deterministic acquisition. The second VERCEL_ENV gate makes
     # this impossible to activate on a Vercel production deployment by setting
     # PREVIEW_DEMO_MODE alone.

@@ -120,8 +120,7 @@ celery -A app.workers.celery_app beat --loglevel=info
 ```bash
 cd frontend
 npm install
-# Create .env.local if API is not on default port:
-echo "VITE_API_URL=http://localhost:8000/api" > .env.local
+# Keep VITE_API_URL unset: Vite's same-origin /api proxy targets localhost:8000.
 npm run dev
 # Open http://localhost:3000
 ```

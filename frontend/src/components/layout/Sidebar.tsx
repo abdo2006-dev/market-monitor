@@ -11,8 +11,10 @@ import {
   Radar,
   Search,
   Settings,
+  LogOut,
   X,
 } from 'lucide-react'
+import { useAuth } from '../AuthGate'
 
 const MARKET_NAV = [
   { to: '/search', label: 'Search', icon: Search },
@@ -64,6 +66,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const location = useLocation()
   const preview = import.meta.env.VITE_PREVIEW_DEMO_MODE === 'true'
+  const { logout } = useAuth()
 
   useEffect(() => setMobileOpen(false), [location.pathname])
   useEffect(() => {
@@ -89,6 +92,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <span className={`environment-dot ${preview ? 'is-preview' : ''}`} />
           <span><strong>{preview ? 'Protected preview' : 'Market workspace'}</strong><small>{preview ? 'Isolated test data' : 'Daily operations'}</small></span>
         </div>
+        <button type="button" className="sidebar-lock" onClick={() => void logout()}><LogOut size={15} aria-hidden="true" /> Lock workspace</button>
       </aside>
 
       <header className="mobile-header">
@@ -103,6 +107,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <aside id="mobile-navigation" className="mobile-drawer" role="dialog" aria-modal="true" aria-label="Application navigation" onClick={event => event.stopPropagation()}>
             <div className="mobile-drawer-head"><span>Navigate</span><button type="button" className="icon-button" onClick={() => setMobileOpen(false)} aria-label="Close navigation"><X size={20} /></button></div>
             <AppNav onNavigate={() => setMobileOpen(false)} />
+            <button type="button" className="sidebar-lock mobile-lock" onClick={() => void logout()}><LogOut size={15} aria-hidden="true" /> Lock workspace</button>
           </aside>
         </div>
       )}

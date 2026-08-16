@@ -1,64 +1,56 @@
 # Security
 
-Assessment at baseline `f346f70`. This application currently has **no authentication of
-any kind** and is designed for single-operator use. That is a defensible choice for a
-personal tool, but it means every item below is reachable by anyone who can reach the URL.
+The baseline assessment was performed at `f346f70`. Phase 1G adds a deliberately small
+single-operator production access gate. It is not a multi-user identity system: one
+server-side password hash establishes a signed, expiring browser session, and every data
+or mutation API remains inaccessible without that session.
 
 ---
 
 ## 1. Findings
 
-### 1.1 No authentication or authorization — **High** (by design, but undocumented)
+### 1.1 Production application access — **resolved for the single-operator topology**
 
-`backend/app/main.py` registers no auth middleware. Every route is public: creating,
-editing, and deleting competitors; triggering scans; reading all collected pricing data;
-changing settings.
+`app.auth.SingleUserAuthMiddleware` protects all API data and mutation routes when
+`APP_AUTH_ENABLED=true`. The only public application endpoints are `/health`, auth status,
+and login. Cron routes use their separate bearer guard. The SPA mounts no workspace route
+until auth status proves an active session, and a lock action clears it.
 
-If the Vercel deployment is publicly reachable, an anonymous visitor can trigger unlimited
-scans (using your infrastructure to scrape third parties), delete all monitored
-competitors, and read the entire dataset.
+The password is stored only as PBKDF2-SHA256 (600,000 iterations); an independent secret
+signs a 12-hour default session cookie. The cookie is `Secure`, `HttpOnly`, `SameSite=Strict`,
+and scoped to `/`. Rotating either the password hash or signing secret invalidates existing
+sessions. State-changing browser calls also require the fixed non-simple
+`X-Market-Monitor-CSRF` header and a same-origin `Origin` when supplied. Missing or malformed
+auth configuration fails closed. No GitHub/cron/database credential is sent to the browser.
 
-**Mitigation** Do not expose the deployment publicly, or put it behind Vercel's
-deployment protection / an authenticating proxy. Application-level auth is deferred; if it
-is added later, it belongs in the API layer per `docs/ARCHITECTURE.md` B-2.
+Vercel Standard Protection remains appropriate for Preview. The current Hobby plan does
+not protect the Production domain, which is why Production must set the application gate.
 
-### 1.2 CORS allows all origins with credentials — **High**
+### 1.2 Cross-origin browser access — **resolved**
 
-`app/main.py:19-25`:
+`app/main.py` now configures no cross-origin allowlist, credentials, methods, or headers:
 
 ```python
-allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
+allow_origins=[], allow_credentials=False, allow_methods=[], allow_headers=[]
 ```
 
-`*` with `allow_credentials=True` is a configuration browsers reject for credentialed
-requests, so it is currently ineffective rather than actively exploited — but it signals
-intent to allow cross-origin credentialed access, and it means any website a user visits
-can issue unauthenticated requests to the API from their browser. Combined with 1.1, a
-malicious page can silently delete competitors on a locally-running instance.
+Production uses one origin for UI and API. Local development should use Vite's `/api`
+proxy rather than a cross-origin `VITE_API_URL`.
 
-**Mitigation** Set an explicit origin allowlist. With no cookie-based auth,
-`allow_credentials` should be `False`.
-
-### 1.3 Cron endpoints are unauthenticated by default — **High**
+### 1.3 Cron bearer authentication — **resolved**
 
 `api/cron.py:15`:
 
 ```python
 def _check_auth(authorization: str | None):
-    if settings.CRON_SECRET and authorization != f"Bearer {settings.CRON_SECRET}":
+    expected = f"Bearer {settings.CRON_SECRET}" if settings.CRON_SECRET else None
+    if expected is None or authorization is None or not secrets.compare_digest(...):
         raise HTTPException(401)
 ```
 
-The guard is a **no-op when `CRON_SECRET` is unset**, and it defaults to `None`
-(`config.py:26`). So `/api/cron/scan-due`, `/api/cron/daily-summary`, and `/api/cron/daily`
-are fully public out of the box. `/api/cron/scan-due` runs scans inline, so it is an
-unauthenticated way to make the server scrape every competitor on demand.
-
-The comparison is also non-constant-time, which is a minor timing concern relative to the
-default-off problem.
-
-**Mitigation** Set `CRON_SECRET` in every deployment. Better: fail closed — refuse to
-serve the cron routes at all if the secret is unset. Use `secrets.compare_digest`.
+The routes now return 401 when `CRON_SECRET` is absent and compare configured bearer values
+in constant time. Production still keeps Vercel morning Sync disabled; GitHub is the one
+automatic owner only after the manual rollout proof.
 
 ### 1.4 Discord webhook URLs are unprotected credentials — **Medium**
 
@@ -66,7 +58,8 @@ A Discord webhook URL is a bearer credential: anyone holding it can post to that
 
 They are stored as plaintext `String(500)` in `competitors.discord_webhook_url`, returned
 in full by `GET /api/competitors` (via `CompetitorOut`), and rendered into the competitor
-edit form. With no authentication (1.1), the API hands out every webhook URL to any caller.
+edit form. Phase 1G prevents anonymous access, but masking write-only credentials remains
+the better API design.
 
 **Mitigation** Do not return the webhook in list responses; return a masked form and
 accept writes only. Longer term, store credentials separately from the entity.
@@ -144,11 +137,10 @@ connection error, internal hostnames.
 
 **Mitigation** Log the detail; return and notify a classified summary.
 
-### 1.9 `SECRET_KEY` is unused — **Informational**
+### 1.9 Legacy `SECRET_KEY` remains unused — **Informational**
 
-Declared (`config.py:8`), documented in `.env.example` with generation instructions, and
-read by nothing. There is no session, token, or signing mechanism. It is currently
-harmless, but it gives a false impression that something is being signed.
+The new session deliberately uses the explicit `APP_AUTH_SESSION_SECRET`; it does not
+silently repurpose the older generic `SECRET_KEY`.
 
 ### 1.10 Repository hygiene — **resolved in Phase 0**
 
@@ -197,13 +189,7 @@ automatic Sync are disabled, and no Preview worker is connected. See
 
 ## 4. Recommended order of remediation
 
-1. `CRON_SECRET` — fail closed when unset (1.3). Small change, removes an unauthenticated
-   scan trigger.
-2. CORS allowlist (1.2). Small change.
-3. Mask webhook URLs in API responses (1.4).
-4. Decide explicitly on Storefront token discovery (1.5) and record an ADR.
-5. Validate `base_url` on write (1.6).
-6. Bound response sizes in the scraper (1.7).
-
-Authentication (1.1) is deliberately not on this list: it is a product decision, not a
-defect to be fixed silently. If the deployment is or becomes public, it moves to the top.
+1. Mask webhook URLs in API responses (1.4).
+2. Decide explicitly on Storefront token discovery (1.5) and record an ADR.
+3. Validate `base_url` on write (1.6).
+4. Bound response sizes in the scraper (1.7).
