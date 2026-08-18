@@ -91,6 +91,26 @@ async def request_status(request_id: UUID, db: AsyncSession = Depends(get_db)):
     return payload
 
 
+@router.post(
+    "/requests/{request_id}/dispatch",
+    response_model=SyncRequestStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_request_dispatch(request_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Retry runner notification for the same durable request; never create new work."""
+    payload = await get_request_status(db, request_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Sync request not found")
+    if payload["status"] not in {"queued", "retrying"}:
+        raise HTTPException(status_code=409, detail="Sync request is not waiting for recovery")
+    await dispatch_sync_request(request_id)
+    db.expire_all()
+    refreshed = await get_request_status(db, request_id)
+    if refreshed is None:
+        raise HTTPException(status_code=500, detail="Durable Sync request could not be reloaded")
+    return refreshed
+
+
 @router.get("/runs/{run_id}", response_model=SyncRunStatus)
 async def run_status(run_id: int, db: AsyncSession = Depends(get_db)):
     payload = await get_run_status(db, run_id)

@@ -57,6 +57,8 @@ export const scanAllCompetitors = (): Promise<ScanAllSummary> =>
   api.post('/sync/all').then(r => r.data)
 export const getSyncRequest = (requestId: string): Promise<SyncRequestStatus> =>
   api.get(`/sync/requests/${requestId}`).then(r => r.data)
+export const retrySyncDispatch = (requestId: string): Promise<SyncRequestStatus> =>
+  api.post(`/sync/requests/${requestId}/dispatch`).then(r => r.data)
 export const getSyncRun = (runId: number): Promise<SyncRunStatus> =>
   api.get(`/sync/runs/${runId}`).then(r => r.data)
 export const getSyncFreshness = (): Promise<CompetitorFreshness[]> =>

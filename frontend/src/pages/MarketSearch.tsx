@@ -63,6 +63,16 @@ function readableAge(seconds: number | null) {
   return `${days} day${days === 1 ? '' : 's'} ago`
 }
 
+function compactTrustNote(row: CompareRow) {
+  const age = readableAge(row.trust.product_observation_age_seconds)
+  if (row.trust.coverage_state === 'unknown') return `Legacy data · observed ${age}`
+  if (row.trust.coverage_state === 'failed') return `Sync failed · stored price ${age}`
+  if (row.trust.coverage_state === 'stale') return `Stored price · observed ${age}`
+  if (row.trust.coverage_state === 'partial') return `Partial catalog · observed ${age}`
+  if (row.trust.coverage_state === 'suspicious_empty') return 'Storefront returned an untrusted empty catalog'
+  return null
+}
+
 export function priceDifferenceLabel(difference: number, currency: string) {
   if (difference < 0) return `${formatPrice(Math.abs(difference), currency)} below reliable low`
   return `${formatPrice(difference, currency)} above reliable low`
@@ -440,6 +450,7 @@ function CompetitorResult({ row, onOpenProduct }: { row: CompareRow; onOpenProdu
   const product = row.product
   const coverage = COVERAGE_COPY[row.trust.coverage_state]
   const difference = row.difference_from_reliable_low
+  const trustNote = compactTrustNote(row)
   return (
     <article className={`competitor-result ${row.trust.reliable ? 'is-reliable' : 'is-degraded'}`}>
       <div className="competitor-main">
@@ -453,6 +464,7 @@ function CompetitorResult({ row, onOpenProduct }: { row: CompareRow; onOpenProdu
             {row.trust.coverage_state === 'current_complete' ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}
             {coverage.label}
           </span>
+          {trustNote && <span className="trust-note" title={row.trust.warning || trustNote}>{trustNote}</span>}
         </div>
       </div>
 
@@ -483,16 +495,13 @@ function CompetitorResult({ row, onOpenProduct }: { row: CompareRow; onOpenProdu
         <div className="no-listing"><span>No matched active listing</span><small>Coverage evidence still applies to this competitor.</small></div>
       )}
 
-      {(row.trust.warning || row.price_change) && (
+      {row.price_change && (
         <div className="result-context">
-          {row.trust.warning && <p><AlertTriangle size={14} /> {row.trust.warning}</p>}
-          {row.price_change && (
-            <p className={`change-context change-context--${row.price_change.direction}`}>
-              {row.price_change.direction === 'decrease' ? <ArrowDownRight size={15} /> : <ArrowUpRight size={15} />}
-              Price {row.price_change.direction === 'decrease' ? 'fell' : 'rose'} from {formatPrice(row.price_change.previous_price, row.price_change.currency)} by {formatPrice(row.price_change.amount, row.price_change.currency)}
-              {row.price_change.percentage != null ? ` (${row.price_change.percentage.toFixed(1)}%)` : ''} · {formatDate(row.price_change.changed_at)}
-            </p>
-          )}
+          <p className={`change-context change-context--${row.price_change.direction}`}>
+            {row.price_change.direction === 'decrease' ? <ArrowDownRight size={15} /> : <ArrowUpRight size={15} />}
+            Price {row.price_change.direction === 'decrease' ? 'fell' : 'rose'} from {formatPrice(row.price_change.previous_price, row.price_change.currency)} by {formatPrice(row.price_change.amount, row.price_change.currency)}
+            {row.price_change.percentage != null ? ` (${row.price_change.percentage.toFixed(1)}%)` : ''} · {formatDate(row.price_change.changed_at)}
+          </p>
         </div>
       )}
 
@@ -501,6 +510,7 @@ function CompetitorResult({ row, onOpenProduct }: { row: CompareRow; onOpenProdu
         <div>
           <span>Required Cairo cycle <strong>{row.trust.required_cycle_date}</strong></span>
           <span>Current acquisition <strong>{row.trust.current_completeness.replace('_', ' ')}</strong></span>
+          {row.trust.warning && <span className="evidence-warning">Why this is degraded <strong>{row.trust.warning}</strong></span>}
           <span>Producing run <strong>{row.trust.producing_run ? `#${row.trust.producing_run.run_id}` : 'Legacy / unknown'}</strong></span>
           <span>Latest complete <strong>{row.trust.latest_complete_run ? `#${row.trust.latest_complete_run.run_id} · ` : ''}{formatDate(row.trust.latest_complete_at)}</strong></span>
           {row.trust.latest_partial_run && <span>Latest partial <strong>#{row.trust.latest_partial_run.run_id} · {formatDate(row.trust.latest_partial_at)}</strong></span>}

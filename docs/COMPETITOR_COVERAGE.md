@@ -65,7 +65,7 @@ the manual workflow intentionally omits it. Any fix must be platform-level and
 fixture-backed—do not add one-off per-store parsing branches when an existing adapter
 family can own the behavior.
 
-## Latest attended evidence — 2026-08-16
+## Latest attended evidence — 2026-08-18
 
 The complete sequential matrix plus focused post-fix reruns produced this current verdict:
 
@@ -75,18 +75,25 @@ The complete sequential matrix plus focused post-fix reruns produced this curren
 | Bloxloot | 2,363 | 100% | products.json (aiohttp) | complete | HEALTHY |
 | TubbysTubby | 0 | — | Salla | failed | FAILED |
 | Bloxshop | 549 | 100% | products.json (aiohttp) | complete | HEALTHY |
-| BloxyBarn | 887 | 100% | products.json (aiohttp) | complete | HEALTHY |
+| BloxyBarn | 888 | 100% | products.json (aiohttp) | complete | HEALTHY |
 | MM2Cheap | 395 | 100% | products.json (aiohttp) | complete | HEALTHY |
 | Shopbloxs | 534 | 100% | Storefront GraphQL root products | complete | HEALTHY |
-| Luger.GG | 2,372 | 100% | products.json (aiohttp) | complete | HEALTHY |
-| BuyBlox | 0 | — | Shopify cascade | failed | FAILED |
+| Luger.GG | 2,547 | 100% | products.json (aiohttp) | complete | HEALTHY |
+| BuyBlox | 2,598* | 100% | products.json (public Shopify endpoint) | complete | NETWORK-SPECIFIC |
 | PetPatch.GG | 252 | 100% | products.json (aiohttp) | complete | HEALTHY |
 | BloxCrew | 1,067 | 100% | Storefront GraphQL | complete | HEALTHY |
 | Bloxy Store | 345 | 100% | products.json (aiohttp) | complete | HEALTHY |
 
-All ten healthy rows had zero duplicate external-identity and canonical-URL evidence. No
-429 or 5xx response was observed. TubbysTubby's canonical hostname currently serves a
-parked/non-catalog page. BuyBlox fails as `temporary_network`, consistent with its public
-certificate-chain failure; certificate verification remains enabled. These are release
-findings, not permission to substitute a historical hostname, bypass TLS, or write either
-Preview or Production data.
+All ten standard-runner healthy rows had zero duplicate external-identity and canonical-URL
+evidence. No 429 or 5xx response was observed. TubbysTubby's canonical hostname currently
+serves a coming-soon portfolio rather than a catalog; it is therefore an inactive
+competitor, with historical products retained rather than inferred absent.
+
+`*` The ordinary local BuyBlox attempt failed safely as `temporary_network`. The local DNS
+resolver returned `195.71.232.240` with a Whalebone Sinkhole certificate, while Google and
+Cloudflare public DNS returned Shopify's `23.227.38.65`. A focused, hostname-verified request
+to that public Shopify address paged 10 full pages of 250 plus a final page of 98: 2,598
+unique products and 100% valid variant prices. Certificate verification remained enabled;
+no application TLS bypass or store-specific parser branch was introduced. Production-runner
+evidence is still required because the production topology, not a local DNS override, is
+the release authority.

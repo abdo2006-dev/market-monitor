@@ -289,6 +289,9 @@ describe('Market Search daily-use states', () => {
       requested_at: '2026-08-12T08:00:00Z',
       dispatch_status: 'not_requested' as const,
       dispatch_error_category: null,
+      runner_state: 'awaiting_dispatch' as const,
+      needs_runner_recovery: false,
+      oldest_queued_seconds: 1,
       runs: [],
     }
     mockedScanAll.mockResolvedValue(accepted)

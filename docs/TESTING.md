@@ -11,7 +11,7 @@
 
 ---
 
-## 0. Current state (Phase 1F acceptance gate)
+## 0. Current state (Phase 1G production-recovery gate)
 
 The exact full-suite count is recorded after every release run in `docs/PROJECT_STATUS.md`.
 Phase 1F adds two explicit acceptance layers:
@@ -38,13 +38,15 @@ cd backend && TEST_DATABASE_URL=postgresql+asyncpg://market:market@localhost:543
 | Suite | Tests | Covers |
 |---|---|---|
 | `tests/test_core.py` | 65 | pure helpers (unchanged from Phase 0) |
+| `tests/test_preview_demo.py` | 6 | deterministic Preview fixtures, production fail-closed behavior, schema/fixture ownership |
 | `tests/test_search_trust.py` | 4 | Cairo-cycle boundary, current/stale coverage, out-of-stock price eligibility |
 | `tests/test_sync_workflow_release_gate.py` | 5 | Cairo-local schedules, default-off automation, safe triggers, environment-scoped secrets, manual live-smoke isolation, pinned trusted actions, minimum permissions |
 | `tests/acceptance/` | 14 | fixture-backed acquisition contracts and one migrated-PostgreSQL Sync → Search → Export morning journey |
-| `tests/critical/test_schema_authority.py` | 12 | Alembic authority, real B- fingerprint, credential-safe classifier failure |
+| `tests/critical/test_auth_security.py` | 5 | signed sessions, CSRF, fail-closed auth configuration, protected APIs and cron |
+| `tests/critical/test_schema_authority.py` | 13 | Alembic authority, real B- fingerprint, credential-safe classifier failure |
 | `tests/critical/test_sync_regression.py` | 32 | reconciliation, idempotency, failure, concurrency, stale ordering |
 | `tests/critical/test_product_integrity.py` | 5 | identity semantics, database constraints, duplicate audit/consolidation |
-| `tests/critical/test_sync_lifecycle.py` | 34 | requests, idempotency, claims, leases, retries, observation ordering, completeness, freshness, lineage, API/worker truthfulness, disabled morning entry points |
+| `tests/critical/test_sync_lifecycle.py` | 38 | requests, idempotency, claims, leases, retries, dispatch recovery, runner-wait diagnostics, observation ordering, completeness, freshness, lineage, API/worker truthfulness, disabled morning entry points |
 | `tests/critical/test_search_regression.py` | 35 | matching and guarded fallback, grouping, typed contract, trust states, currencies, reliable/observed summaries, snapshots, active Sync |
 | `tests/critical/test_export_regression.py` | 24 | live/cached mode truth, completeness, safe failures, provenance, compatibility, URL safety, lineage |
 
@@ -55,17 +57,19 @@ and unacceptable in CI, so CI sets it and additionally fails if a skip is detect
 conftest refuses to run unless the database name contains `test`, so the suite cannot
 truncate a real database.
 
-The lifecycle tests specifically prove request→queue→claim→terminal transitions, one
+The current backend total is **246 tests**. The lifecycle tests specifically prove request→queue→claim→terminal transitions, one
 concurrent claim owner, lease recovery/fencing, retry success/exhaustion, manual/Sync-All/
 morning idempotency, the absence rules for complete/partial/capped/empty/failed results,
 observation-time ordering, failed-later preservation, history lineage and replay safety,
 completion-order inversion (`$5` observed earlier cannot beat `$3` observed later),
 equal-time run-ID tie-breaking, rejection of storefront timestamps, HTTP 202 durability,
-dispatch failure truthfulness, and worker clean exit.
+dispatch failure truthfulness, same-request manual redispatch, dispatched-without-runner
+diagnostics, expired-lease recovery, and worker clean exit.
 
-Frontend `src/pages/MarketSearch.test.tsx` and `src/pages/Exports.test.tsx` use Vitest +
-Testing Library for daily Search and Export loading/success/degradation/failure states and
-truthful operator actions. Run them with `npm run test:run`.
+Frontend `src/pages/MarketSearch.test.tsx`, `src/pages/Exports.test.tsx`, and
+`src/pages/Competitors.test.tsx` provide **20 Vitest tests** for daily Sync, Search, and
+Export loading/success/degradation/failure states and truthful operator actions. Run them
+with `npm run test:run`.
 
 Playwright is now a required deterministic CI gate. The separate manual live coverage
 runner is intentionally not a test and not blocking; see `docs/COMPETITOR_COVERAGE.md`.

@@ -160,6 +160,7 @@ profiles, or webhook URLs.
 | `SYNC_EXECUTION_MODE` | `v2` | explicit durable/legacy boundary |
 | `SYNC_MAX_ATTEMPTS` | `3` | durable run attempt budget |
 | `SYNC_LEASE_SECONDS` | `600` | claim lease; heartbeat renews at most every 60s |
+| `SYNC_RUNNER_WAIT_SECONDS` | `300` | age after which queued work is reported as waiting for runner/recovery |
 | `SYNC_MORNING_ENABLED` | `false` | default-off automatic morning request/drain gate |
 | `SYNC_DISPATCH_PROVIDER` | `none` | set `github_actions` only on the server |
 | `GITHUB_ACTIONS_DISPATCH_TOKEN` | unset | fine-grained server-only Actions token |
@@ -177,6 +178,13 @@ profiles, or webhook URLs.
 
 The GitHub workflow sets `DATABASE_URL` from `secrets.PRODUCTION_DATABASE_URL` in the
 `production-sync` environment. It must not share the optional GitHub dispatcher token.
+
+When the optional GitHub dispatcher is enabled, the Vercel server requires a separate
+fine-grained token limited to this repository with **Actions: write**. The browser never
+receives it. Dispatch failure leaves PostgreSQL work queued, records only a safe category,
+and can be retried with `POST /api/sync/requests/{uuid}/dispatch`. The 07:17/08:47 Cairo
+workflow remains the scheduled recovery path; the second invocation derives the same daily
+idempotency key and cannot duplicate a successful first run.
 
 ## 6. Staged production deployment
 

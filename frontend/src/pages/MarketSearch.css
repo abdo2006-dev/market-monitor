@@ -162,6 +162,7 @@
 .competitor-name small { color: var(--muted); font-size: 9px; }
 .store-mark { display: grid; width: 29px; height: 29px; flex: 0 0 29px; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-raised); color: #87a9cf; }
 .trust-cluster { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.trust-note { align-self: center; max-width: 250px; overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .trust-pill { gap: 4px; padding: 3px 7px; border: 1px solid; border-radius: 999px; font-size: 9px; font-weight: 650; white-space: nowrap; }
 .trust-pill--good { border-color: rgba(72,199,142,.25); background: var(--success-soft); color: #72d6ad; }
 .trust-pill--warn { border-color: rgba(231,183,91,.25); background: var(--warning-soft); color: #e5c47e; }
@@ -190,6 +191,17 @@
 .evidence-details summary { width: max-content; padding: 7px 13px; cursor: pointer; }
 .evidence-details > div { display: flex; flex-wrap: wrap; gap: 7px 16px; padding: 0 13px 10px; }
 .evidence-details strong { color: var(--text-soft); font-weight: 600; }
+.evidence-warning { flex-basis: 100%; }
+
+@media (min-width: 1121px) {
+  .competitor-result { display: grid; grid-template-columns: minmax(210px, .8fr) minmax(560px, 2fr); align-items: center; }
+  .competitor-main { min-width: 0; padding: 7px 10px; border-bottom: 0; }
+  .competitor-main .trust-cluster { display: grid; justify-items: end; }
+  .competitor-body { min-width: 0; grid-template-columns: 32px minmax(210px, 1fr) minmax(125px, .35fr) auto; gap: 9px; padding: 6px 10px; }
+  .product-thumb { width: 32px; height: 32px; }
+  .result-context, .evidence-details { grid-column: 1 / -1; }
+  .evidence-details summary { padding-top: 5px; padding-bottom: 5px; }
+}
 .search-state-card { margin-top: 18px; padding: 16px; text-align: center; }
 .results-skeleton { display: grid; gap: 12px; margin-top: 18px; }
 .results-skeleton > span, .results-skeleton > div { border-radius: var(--radius-lg); background: linear-gradient(90deg, #101721 25%, #1a2533 50%, #101721 75%); background-size: 200% 100%; animation: shimmer 1.3s infinite; }

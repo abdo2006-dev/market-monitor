@@ -24,6 +24,16 @@ const competitor = {
   updated_at: '2026-08-16T07:31:00Z',
 }
 
+const competitorNames = ['Alpha Market', 'Bloxloot', 'TubbysTubby', 'Bloxshop', 'BloxyBarn', 'MM2Cheap', 'Shopbloxs', 'Luger.GG', 'BuyBlox', 'PetPatch.GG', 'BloxCrew', 'Bloxy Store']
+const competitors = competitorNames.map((name, index) => ({
+  ...competitor,
+  id: index + 1,
+  name,
+  base_url: index === 0 ? competitor.base_url : `https://${name.toLowerCase().replace(/[^a-z0-9]/g, '')}.example`,
+  active: name !== 'TubbysTubby',
+  last_scan_status: name === 'BuyBlox' ? 'failed' : name === 'TubbysTubby' ? 'failed' : 'success',
+}))
+
 const product = {
   id: 10,
   competitor_id: 1,
@@ -71,6 +81,8 @@ const run = (overrides: Record<string, unknown> = {}) => ({
   page_cap_reached: false,
   acquisition_strategy: 'shopify_products_json_aiohttp',
   duration_seconds: 60,
+  queue_age_seconds: 0,
+  operator_state: 'success',
   ...overrides,
 })
 
@@ -296,11 +308,18 @@ async function installApi(page: Page, options: MockOptions = {}) {
       return fulfillJson(route, { enabled: true, authenticated: true })
     }
     if (options.authRequired && !authenticated) return fulfillJson(route, { detail: 'Authentication required' }, 401)
-    if (path === '/api/competitors') return fulfillJson(route, [competitor, { ...competitor, id: 2, name: 'Beta Market', base_url: 'https://beta.example', last_scan_status: 'partial' }])
-    if (path === '/api/sync/freshness') return fulfillJson(route, [
-      { competitor_id: 1, competitor_name: 'Alpha Market', coverage_complete: true, last_complete_at: '2026-08-16T07:30:00Z', latest_partial_at: null, last_failed_at: null, active_run: null },
-      { competitor_id: 2, competitor_name: 'Beta Market', coverage_complete: false, last_complete_at: '2026-08-15T07:30:00Z', latest_partial_at: '2026-08-16T07:35:00Z', last_failed_at: null, active_run: null },
-    ])
+    if (path === '/api/competitors') return fulfillJson(route, competitors)
+    if (path === '/api/sync/freshness') return fulfillJson(route, competitors.map(item => ({
+      competitor_id: item.id,
+      competitor_name: item.name,
+      coverage_complete: item.name !== 'BuyBlox' && item.active,
+      last_complete_at: item.active ? '2026-08-16T07:30:00Z' : null,
+      latest_partial_at: null,
+      last_failed_at: item.name === 'BuyBlox' ? '2026-08-16T07:35:00Z' : null,
+      active_products: item.id * 125,
+      last_complete_run: item.active ? run({ run_id: 100 + item.id, competitor_id: item.id, competitor_name: item.name, products_observed: item.id * 125 }) : null,
+      active_run: null,
+    })))
     if (path === '/api/search/suggestions') return fulfillJson(route, suggestionPayload(url.searchParams.get('q') || ''))
     if (path === '/api/search/compare') {
       if (options.compareFailure) return fulfillJson(route, { detail: 'Comparison unavailable' }, 503)
@@ -308,11 +327,11 @@ async function installApi(page: Page, options: MockOptions = {}) {
     }
     if (path === '/api/sync/all' && request.method() === 'POST') return fulfillJson(route, {
       request_id: '00000000-0000-0000-0000-000000000001', trigger: 'manual_all', status: 'queued',
-      requested_at: '2026-08-16T08:00:00Z', dispatch_status: 'not_requested', dispatch_error_category: null, runs: [],
+      requested_at: '2026-08-16T08:00:00Z', dispatch_status: 'not_requested', dispatch_error_category: null, runner_state: 'waiting_for_runner', needs_runner_recovery: true, oldest_queued_seconds: 360, runs: [],
     }, 202)
     if (path.startsWith('/api/sync/requests/')) return fulfillJson(route, {
       request_id: '00000000-0000-0000-0000-000000000001', trigger: 'manual_all', status: 'queued',
-      requested_at: '2026-08-16T08:00:00Z', dispatch_status: 'not_requested', dispatch_error_category: null, runs: [],
+      requested_at: '2026-08-16T08:00:00Z', dispatch_status: 'not_requested', dispatch_error_category: null, runner_state: 'waiting_for_runner', needs_runner_recovery: true, oldest_queued_seconds: 360, runs: [],
     })
     if (path === '/api/exports/collection-prices') {
       const state = options.exportState || 'complete'
@@ -379,7 +398,7 @@ test('Search keyboard journey keeps reliable and degraded evidence distinct', as
   await search.press('Enter')
   await expect(page.getByRole('heading', { name: 'Trustworthy price range' })).toHaveCount(2)
   await expect(page.getByText('Complete coverage')).toBeVisible()
-  await expect(page.getByText('Partial catalog')).toBeVisible()
+  await expect(page.getByText('Partial catalog', { exact: true })).toBeVisible()
   await expect(page.getByText('Visible, excluded from the reliable range', { exact: true })).toBeVisible()
   await expect(page.getByText('Out of stock')).toBeVisible()
   await expect(page.getByText(/Price fell from \$60\.00 by \$15\.00/i)).toBeVisible()
@@ -424,15 +443,21 @@ test('Export prepares and parses real CSV, JSON, and JSONL downloads', async ({ 
   expect(testInfo.project.name).toMatch(/desktop|tablet|mobile/)
 })
 
-test('Competitors reports HTTP 202 as queued, never complete', async ({ page }) => {
+test('Competitors is compact, expandable, and reports HTTP 202 as waiting for runner', async ({ page }, testInfo) => {
   const consoleErrors = watchConsole(page)
   await installApi(page)
   await page.goto('/competitors')
   await expect(page.getByRole('heading', { name: 'Competitor sync' })).toBeVisible()
-  await expect(page.getByText('Partial').first()).toBeVisible()
+  await expect(page.getByRole('table', { name: 'Competitor sync operations' })).toBeVisible()
+  await expect(page.getByText('TubbysTubby', { exact: true })).toBeVisible()
+  await expect(page.getByRole('table', { name: 'Competitor sync operations' }).getByText('Inactive', { exact: true })).toBeVisible()
+  if (testInfo.project.name === 'desktop-1440') await expect(page.getByText('Bloxy Store')).toBeInViewport()
+  if (testInfo.project.name === 'tablet-1024') await expect(page.getByText('PetPatch.GG')).toBeInViewport()
+  await page.getByRole('button', { name: 'Show details for Alpha Market' }).click()
+  await expect(page.getByText('Coverage evidence')).toBeVisible()
   await page.getByRole('button', { name: /Sync all/i }).click()
-  await expect(page.getByText('Sync request queued')).toBeVisible()
-  await expect(page.getByText(/dispatch not requested/i)).toBeVisible()
+  await expect(page.getByText('Queued · waiting for runner')).toBeVisible()
+  await expect(page.getByText(/oldest queued 6m/i)).toBeVisible()
   await expect(page.getByText(/Sync complete/i)).toHaveCount(0)
   await assertNoOverflow(page)
   await capture(page, 'competitors')

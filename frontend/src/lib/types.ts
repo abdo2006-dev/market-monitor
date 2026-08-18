@@ -261,8 +261,11 @@ export interface SyncRunStatus {
   trigger: string
   queued_at: Timestamp
   started_at?: Timestamp | null
+  claimed_at?: Timestamp | null
   acquisition_started_at?: Timestamp | null
   acquisition_completed_at?: Timestamp | null
+  observation_started_at?: Timestamp | null
+  observation_completed_at?: Timestamp | null
   reconciled_at?: Timestamp | null
   terminal_at?: Timestamp | null
   attempt: number
@@ -273,11 +276,17 @@ export interface SyncRunStatus {
   failure_reason?: string | null
   products_observed: number
   pages_fetched: number
+  request_count: number
   page_cap_reached: boolean
   acquisition_strategy?: string | null
   completeness: AcquisitionCompleteness
   completeness_reason?: string | null
   duration_seconds?: number | null
+  queue_latency_seconds?: number | null
+  acquisition_duration_seconds?: number | null
+  reconciliation_duration_seconds?: number | null
+  queue_age_seconds: number
+  operator_state: 'queued' | 'waiting_for_runner' | 'running' | 'lease_expired' | 'retry_scheduled' | SyncRunState
 }
 
 export interface SyncRequestStatus {
@@ -287,6 +296,9 @@ export interface SyncRequestStatus {
   requested_at: Timestamp
   dispatch_status: 'not_requested' | 'dispatched' | 'failed'
   dispatch_error_category?: string | null
+  runner_state: 'awaiting_dispatch' | 'dispatched' | 'waiting_for_runner' | 'dispatch_recovery' | 'running' | 'retry_wait' | 'terminal'
+  needs_runner_recovery: boolean
+  oldest_queued_seconds?: number | null
   runs: SyncRunStatus[]
 }
 
@@ -297,6 +309,8 @@ export interface CompetitorFreshness {
   last_complete_at?: Timestamp | null
   latest_partial_at?: Timestamp | null
   last_failed_at?: Timestamp | null
+  active_products: number
+  last_complete_run?: SyncRunStatus | null
   active_run?: SyncRunStatus | null
 }
 
