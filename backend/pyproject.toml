@@ -23,3 +23,14 @@ dependencies = [
     "tenacity==8.3.0",
     "greenlet==3.0.3",
 ]
+
+[tool.pytest.ini_options]
+# asyncio_mode=auto lets async tests and async fixtures run without per-test
+# decorators. Added in Phase 1A for the daily-critical-path suite; it does not
+# affect the existing synchronous tests.
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "critical: daily critical path (Search, Export, Sync) regression coverage",
+    "acceptance: deterministic Phase 1F workflow and acquisition acceptance",
+]

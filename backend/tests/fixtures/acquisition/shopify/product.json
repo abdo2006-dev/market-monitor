@@ -1,0 +1,16 @@
+{
+  "id": 101,
+  "title": "Batwing",
+  "handle": "batwing",
+  "vendor": "Fixture Store",
+  "product_type": "Murder Mystery 2",
+  "body_html": "Fixture description",
+  "tags": ["fixture"],
+  "images": [{"src": "https://cdn.example.invalid/batwing.png"}],
+  "variants": [{
+    "id": 201,
+    "price": "12.34",
+    "available": true,
+    "sku": "FIX-BATWING"
+  }]
+}

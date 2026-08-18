@@ -1,0 +1,75 @@
+name: Durable Sync V2
+
+# Production database credentials are never exposed to pull requests. GitHub
+# only enables workflow_dispatch and schedule after this file is on the default
+# branch; the job also checks out trusted default-branch code. Both recovery
+# opportunities are expressed directly in Cairo local time so DST is automatic.
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: "Durable Sync request UUID created by Market Monitor"
+        required: true
+        type: string
+  schedule:
+    - cron: "17 7 * * *"
+      timezone: "Africa/Cairo"
+    - cron: "47 8 * * *"
+      timezone: "Africa/Cairo"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: durable-sync-v2-production
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'schedule' && vars.SYNC_MORNING_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production-sync
+    env:
+      DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+      SYNC_EXECUTION_MODE: v2
+      SYNC_MORNING_ENABLED: ${{ vars.SYNC_MORNING_ENABLED || 'false' }}
+      PYTHONUNBUFFERED: "1"
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        run: pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Guard production database secret
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::PRODUCTION_DATABASE_URL is not configured in the production-sync environment."
+            exit 1
+          fi
+
+      - name: Process manually requested group
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          SYNC_REQUEST_ID: ${{ inputs.request_id }}
+        run: python -m app.workers.sync_worker --request-id "$SYNC_REQUEST_ID"
+
+      - name: Ensure and drain today's Cairo morning sync
+        if: github.event_name == 'schedule'
+        run: python -m app.workers.sync_worker --morning

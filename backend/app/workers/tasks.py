@@ -6,6 +6,13 @@ from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
+# Two-key PostgreSQL advisory-lock namespace: "MMPR" + competitor id.
+PRODUCT_RECONCILIATION_LOCK_NAMESPACE = 1296912466
+PRODUCT_IDENTITY_CONSTRAINTS = {
+    "uq_products_competitor_canonical_url",
+    "uq_products_competitor_identity_key",
+}
+
 
 def run_async(coro):
     """Run an async coroutine in a new event loop."""
@@ -31,6 +38,7 @@ async def _scrape_competitor_async(competitor_id: int):
     from app.services.notification import dispatch_event_notifications
     from app.config import settings
     from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
 
     now = datetime.now(timezone.utc)
 
@@ -49,13 +57,9 @@ async def _scrape_competitor_async(competitor_id: int):
         )
         session.add(scrape_run)
         await session.commit()
+        scrape_run_id = scrape_run.id
 
         try:
-            existing_count = (await session.execute(
-                select(Product).where(Product.competitor_id == competitor_id).limit(1)
-            )).scalar_one_or_none()
-            is_initial_scan = existing_count is None
-
             competitor_dict = {
                 "id": competitor.id,
                 "base_url": competitor.base_url,
@@ -76,7 +80,50 @@ async def _scrape_competitor_async(competitor_id: int):
                     "Scrape returned 0 products. Treating this as a failed scan to avoid marking the catalog missing."
                 )
 
-            changes = await detect_changes(session, competitor, products)
+            try:
+                changes, is_initial_scan, stale_observation = await _reconcile_products(
+                    session,
+                    competitor,
+                    scrape_run,
+                    products,
+                    detect_changes,
+                )
+            except IntegrityError as exc:
+                constraint = _integrity_constraint_name(exc)
+                if constraint not in PRODUCT_IDENTITY_CONSTRAINTS:
+                    raise
+                await session.rollback()
+                logger.warning(
+                    "Product identity race resolved by retry for competitor_id=%s "
+                    "scrape_run_id=%s constraint=%s",
+                    competitor_id,
+                    scrape_run_id,
+                    constraint,
+                    extra={
+                        "competitor_id": competitor_id,
+                        "scrape_run_id": scrape_run_id,
+                        "operation": "reconcile_products",
+                        "product_identity": _observation_identity_context(products),
+                        "constraint": constraint,
+                    },
+                )
+                competitor = (
+                    await session.execute(
+                        select(Competitor).where(Competitor.id == competitor_id)
+                    )
+                ).scalar_one()
+                scrape_run = (
+                    await session.execute(
+                        select(ScrapeRun).where(ScrapeRun.id == scrape_run_id)
+                    )
+                ).scalar_one()
+                changes, is_initial_scan, stale_observation = await _reconcile_products(
+                    session,
+                    competitor,
+                    scrape_run,
+                    products,
+                    detect_changes,
+                )
 
             scrape_run.status = "success"
             scrape_run.finished_at = datetime.now(timezone.utc)
@@ -84,8 +131,9 @@ async def _scrape_competitor_async(competitor_id: int):
             scrape_run.new_products_count = changes["new_products"]
             scrape_run.price_changes_count = changes["price_changes"]
 
-            competitor.last_scan_at = datetime.now(timezone.utc)
-            competitor.last_scan_status = "success"
+            if not stale_observation:
+                competitor.last_scan_at = datetime.now(timezone.utc)
+                competitor.last_scan_status = "success"
 
             await session.commit()
 
@@ -131,7 +179,18 @@ async def _scrape_competitor_async(competitor_id: int):
             }
 
         except Exception as e:
+            await session.rollback()
             logger.error(f"Scrape failed for competitor {competitor_id}: {e}")
+            competitor = (
+                await session.execute(
+                    select(Competitor).where(Competitor.id == competitor_id)
+                )
+            ).scalar_one()
+            scrape_run = (
+                await session.execute(
+                    select(ScrapeRun).where(ScrapeRun.id == scrape_run_id)
+                )
+            ).scalar_one()
             scrape_run.status = "failed"
             scrape_run.finished_at = datetime.now(timezone.utc)
             scrape_run.error_message = str(e)[:1000]
@@ -155,6 +214,101 @@ async def _scrape_competitor_async(competitor_id: int):
             return {"status": "failed", "error": str(e)}
 
 
+async def _reconcile_products(
+    session,
+    competitor,
+    scrape_run,
+    products: list[dict],
+    detect_changes,
+) -> tuple[dict, bool, bool]:
+    """Serialize the short database reconciliation region for one competitor."""
+    from app.models import Product, ScrapeRun
+    from sqlalchemy import and_, or_, select, text
+
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:namespace, :competitor_id)"),
+        {
+            "namespace": PRODUCT_RECONCILIATION_LOCK_NAMESPACE,
+            "competitor_id": competitor.id,
+        },
+    )
+    # ScrapeRun.started_at is captured before acquisition and persisted in the
+    # initial run-record transaction.  Under the advisory lock, a committed
+    # later-started successful run is the durable ordering watermark. Failed
+    # runs do not participate and therefore cannot erase a prior success.
+    later_success_id = (
+        await session.execute(
+            select(ScrapeRun.id)
+            .where(
+                ScrapeRun.competitor_id == competitor.id,
+                ScrapeRun.status == "success",
+                or_(
+                    ScrapeRun.started_at > scrape_run.started_at,
+                    and_(
+                        ScrapeRun.started_at == scrape_run.started_at,
+                        ScrapeRun.id > scrape_run.id,
+                    ),
+                ),
+            )
+            .order_by(ScrapeRun.started_at.desc(), ScrapeRun.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if later_success_id is not None:
+        logger.warning(
+            "Skipped stale reconciliation for competitor_id=%s scrape_run_id=%s; "
+            "later_successful_scrape_run_id=%s already committed",
+            competitor.id,
+            scrape_run.id,
+            later_success_id,
+            extra={
+                "competitor_id": competitor.id,
+                "scrape_run_id": scrape_run.id,
+                "later_successful_scrape_run_id": later_success_id,
+                "operation": "skip_stale_reconciliation",
+            },
+        )
+        return {"new_products": 0, "price_changes": 0}, False, True
+
+    existing = (
+        await session.execute(
+            select(Product.id).where(Product.competitor_id == competitor.id).limit(1)
+        )
+    ).scalar_one_or_none()
+    changes = await detect_changes(session, competitor, products)
+    return changes, existing is None, False
+
+
+def _integrity_constraint_name(exc) -> str | None:
+    current = getattr(exc, "orig", None)
+    visited = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        constraint = getattr(current, "constraint_name", None)
+        if constraint:
+            return constraint
+        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+    return None
+
+
+def _observation_identity_context(products: list[dict]) -> list[dict]:
+    from app.domain.product_identity import canonicalize_product_url, product_identity_key
+
+    context = []
+    for item in products[:5]:
+        try:
+            canonical_url = canonicalize_product_url(item.get("url", ""))
+        except ValueError:
+            canonical_url = "invalid"
+        context.append(
+            {
+                "canonical_url": canonical_url,
+                "identity_key": product_identity_key(item.get("external_id")),
+            }
+        )
+    return context
+
+
 def _should_reject_empty_scrape(competitor: dict, products: list[dict]) -> bool:
     selector_config = competitor.get("selector_config") or {}
     return not products and selector_config.get("allow_empty_catalog") is not True
@@ -173,6 +327,11 @@ async def _check_and_schedule_async():
     from sqlalchemy import select, and_
 
     async with AsyncSessionLocal() as session:
+        from app.config import settings
+        if settings.SYNC_EXECUTION_MODE == "v2":
+            # The durable morning schedule is owned by sync-v2.yml. Keeping the old
+            # every-minute beat active would create unintended full-catalog requests.
+            return {"execution": "durable_v2", "status": "legacy_scheduler_disabled"}
         result = await session.execute(
             select(Competitor).where(Competitor.active == True)
         )

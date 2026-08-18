@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from typing import List
@@ -50,7 +50,18 @@ async def seed_default_competitors(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/scan-all")
-async def scan_all(db: AsyncSession = Depends(get_db)):
+async def scan_all(response: Response, db: AsyncSession = Depends(get_db)):
+    if settings.SYNC_EXECUTION_MODE == "v2":
+        from app.application.sync import get_request_status, request_all_competitor_scans
+        from app.infrastructure.github_actions import dispatch_sync_request
+
+        request = await request_all_competitor_scans(db, trigger="manual_all")
+        request_id = request.id
+        await db.commit()
+        await dispatch_sync_request(request_id)
+        db.expire_all()
+        response.status_code = status.HTTP_202_ACCEPTED
+        return await get_request_status(db, request_id)
     result = await db.execute(select(Competitor).where(Competitor.active == True).order_by(Competitor.name))
     competitors = result.scalars().all()
     if not competitors:
@@ -150,13 +161,27 @@ async def delete_competitor(competitor_id: int, db: AsyncSession = Depends(get_d
 
 
 @router.post("/{competitor_id}/scan-now")
-async def scan_now(competitor_id: int, db: AsyncSession = Depends(get_db)):
+async def scan_now(
+    competitor_id: int, response: Response, db: AsyncSession = Depends(get_db)
+):
     result = await db.execute(select(Competitor).where(Competitor.id == competitor_id))
     competitor = result.scalar_one_or_none()
     if not competitor:
         raise HTTPException(status_code=404, detail="Competitor not found")
     if not competitor.active:
         raise HTTPException(status_code=400, detail="Competitor is inactive")
+
+    if settings.SYNC_EXECUTION_MODE == "v2":
+        from app.application.sync import get_request_status, request_competitor_scan
+        from app.infrastructure.github_actions import dispatch_sync_request
+
+        request = await request_competitor_scan(db, competitor_id, trigger="manual")
+        request_id = request.id
+        await db.commit()
+        await dispatch_sync_request(request_id)
+        db.expire_all()
+        response.status_code = status.HTTP_202_ACCEPTED
+        return await get_request_status(db, request_id)
 
     if settings.RUN_SCANS_INLINE or competitor.scrape_type in {"shopify_json", "salla_json"}:
         from app.workers.tasks import _scrape_competitor_async
