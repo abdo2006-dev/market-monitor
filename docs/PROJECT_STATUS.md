@@ -3,32 +3,36 @@
 **Read this first.** This is the handoff file between working sessions. If it is stale,
 fix it as part of the task.
 
-_Last updated: 2026-08-16, Phase 1G controlled Production release in progress; no Production write or deployment has occurred._
+_Last updated: 2026-08-18, Phase 1G controlled Production release in progress; Production database and configuration gates pass, but no V2 deployment or Sync has occurred._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Phase 1G controlled Production release** — immutable source/ancestry checks and the complete local release suite pass. A minimal single-user access gate is implemented on the release branch because the current Vercel Hobby plan cannot protect Production domains. Production remains stopped at the provider-native recovery-object gate. |
+| **Current phase** | **Phase 1G controlled Production release** — source, deterministic suite, exact-sha CI, access protection, recovery, duplicate remediation, schema migration, and initial configuration gates pass. The next gate is the cumulative PR/merge and protected Production deployment; manual and morning Sync remain off. |
 | **Phase 1D base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` (Phase 1C checkpoint) |
 | **Phase 1C base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` |
 | **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
 | **Working branch** | `preview/market-monitor-v2` |
 | **Migration head** | `0005_durable_sync_lifecycle` |
 | **Archive baseline** | `archive/pre-v2-rearchitecture` → `f346f70`; do not move or delete. |
-| **Production** | Current Vercel credential completed trusted-TLS read-only classification/audits. Schema is B-; 12 logical duplicate groups affect 24 products and 121 history rows (57 snapshots + 64 events). Nothing was migrated, consolidated, dispatched, deployed, merged, pushed, or reconfigured. |
+| **Production** | Verified recovery branch `phase1g-pre-migration-20260816-1901z` (`br-muddy-rain-anwgw1dj`) preserves the pre-migration B- state until 2026-08-23 21:02 GMT+2. The 12 audited groups were consolidated to zero conflicts while all 37,947 snapshots and 36,422 events were retained. Production is Case A at `0005_durable_sync_lifecycle` with 13,071 products and no drift. Safe Vercel flags, app authentication, and GitHub `production-sync` are configured; morning/automatic dispatch remain off. No V2 deployment or Production Sync has occurred. |
 | **User-test Preview** | Vercel Preview is Ready on `preview/market-monitor-v2`, backed by isolated resource `market-monitor-v2-preview-db` at migration head with seven deterministic competitors and no runner. See `docs/PREVIEW_TESTING.md`. |
 
 Priority remains: P0 migration safety, P1 Sync, P2 Search, P3 Export, P4 daily-workflow
 UX, then lower-priority features. Treasury Audit remains design-only.
 
 The Phase 1G owner authorization permits the bounded release runbook only after every hard
-gate passes. No Production database/configuration write, merge, or deployment has occurred
-yet. The deterministic validation, one permitted low-impact 12-store coverage run, and
-approved-credential read-only Production classification/audits are complete. The next step
-is to establish and independently read a Neon recovery object before any schema/data write.
+gate passes. The recovery branch was independently queried with the exact pre-migration
+counts before any write. Production moved through B- → stamped 0003 → consolidated → 0004
+→ 0005 → Case A, with final head/drift/constraint/count checks green. GitHub environment
+`production-sync` has a `main`-only policy, `PRODUCTION_DATABASE_URL`, no approval delay,
+and `SYNC_MORNING_ENABLED=false`. Vercel has strict schema verification, V2 execution,
+dispatcher/morning disabled, fail-closed cron credentials, and sensitive application-auth
+credentials. The next step is the cumulative PR to `main`; deployment, one-competitor
+proof, Search/Export proof, Sync All, and only then morning enablement remain pending.
 
-## 1.1 Phase 1G access-control gate (in progress)
+## 1.1 Phase 1G access-control gate (configured; deployment proof pending)
 
 - Vercel API evidence identifies the project plan as Hobby. Current Vercel documentation
   states Standard Protection excludes Production domains on that plan, so provider-level
@@ -44,8 +48,8 @@ is to establish and independently read a Neon recovery object before any schema/
 - The local release suite passes: 242 backend tests against disposable PostgreSQL, 19
   frontend component tests, 15 Playwright cases (plus six intentional viewport skips),
   TypeScript, production build, full downgrade/upgrade sequencing, Alembic drift, and
-  strict application import with 39 routes. Exact-checkpoint CI and the final staged secret
-  scan remain release gates before merge/deploy.
+  strict application import with 39 routes. Gitleaks found no candidate secret and exact
+  candidate `3acb3af71dc7cd1f560946cadf846bacaa7530eb` passed CI run `31968416220`.
 
 ## 2. Phase 1C outcome
 
