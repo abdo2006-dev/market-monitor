@@ -3,20 +3,20 @@
 **Read this first.** This is the handoff file between working sessions. If it is stale,
 fix it as part of the task.
 
-_Last updated: 2026-08-18, Phase 1G controlled Production release in progress; Production database and configuration gates pass, but no V2 deployment or Sync has occurred._
+_Last updated: 2026-08-18, Production Sync recovery in progress after the first protected V2 deployment exposed an intentionally disabled runner dispatch path._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Phase 1G controlled Production release** — source, deterministic suite, exact-sha CI, access protection, recovery, duplicate remediation, schema migration, and initial configuration gates pass. The next gate is the cumulative PR/merge and protected Production deployment; manual and morning Sync remain off. |
+| **Current phase** | **Production Sync recovery and compact operations UX** — exact stuck-request trace complete; diagnostics/redispatch and compact Competitors/Search work are on `codex/production-sync-recovery`. Local deterministic, migration, build, and visual gates pass. Dispatcher credential, deployment, one-source proof, and recovered Sync All remain pending. |
 | **Phase 1D base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` (Phase 1C checkpoint) |
 | **Phase 1C base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` |
 | **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
-| **Working branch** | `preview/market-monitor-v2` |
+| **Working branch** | `codex/production-sync-recovery` from Production `main` merge `d9fc034dad011d26e1e496a8607b66d7b9d7e694` |
 | **Migration head** | `0005_durable_sync_lifecycle` |
 | **Archive baseline** | `archive/pre-v2-rearchitecture` → `f346f70`; do not move or delete. |
-| **Production** | Verified recovery branch `phase1g-pre-migration-20260816-1901z` (`br-muddy-rain-anwgw1dj`) preserves the pre-migration B- state until 2026-08-23 21:02 GMT+2. The 12 audited groups were consolidated to zero conflicts while all 37,947 snapshots and 36,422 events were retained. Production is Case A at `0005_durable_sync_lifecycle` with 13,071 products and no drift. Safe Vercel flags, app authentication, and GitHub `production-sync` are configured; morning/automatic dispatch remain off. No V2 deployment or Production Sync has occurred. |
+| **Production** | Vercel deployment `dpl_3XxcwY3fMyPR2Ljx5dk4bs1XNt7C` is Ready from exact `main` `d9fc034dad011d26e1e496a8607b66d7b9d7e694`; strict startup reports `0005_durable_sync_lifecycle`. Owner-created request `bfaafbdd-7597-4f29-b078-888075da32de` durably created 12 queued runs, but dispatcher `none` produced no GitHub run. Every run remains attempt 0 with no claim/lease/acquisition/reconciliation. Recovery branch `phase1g-pre-migration-20260816-1901z` remains available through 2026-08-23 21:02 GMT+2. |
 | **User-test Preview** | Vercel Preview is Ready on `preview/market-monitor-v2`, backed by isolated resource `market-monitor-v2-preview-db` at migration head with seven deterministic competitors and no runner. See `docs/PREVIEW_TESTING.md`. |
 
 Priority remains: P0 migration safety, P1 Sync, P2 Search, P3 Export, P4 daily-workflow
@@ -29,10 +29,14 @@ counts before any write. Production moved through B- → stamped 0003 → consol
 `production-sync` has a `main`-only policy, `PRODUCTION_DATABASE_URL`, no approval delay,
 and `SYNC_MORNING_ENABLED=false`. Vercel has strict schema verification, V2 execution,
 dispatcher/morning disabled, fail-closed cron credentials, and sensitive application-auth
-credentials. The next step is the cumulative PR to `main`; deployment, one-competitor
-proof, Search/Export proof, Sync All, and only then morning enablement remain pending.
+credentials. Production deployment/authentication passed, then the first owner Sync All
+proved the intentionally disabled dispatcher was not a usable daily topology. The recovery
+branch adds truthful queue/lease diagnostics, same-request redispatch, a compact operations
+table, and reduced Search warning repetition. Configure a least-privilege server dispatcher
+token only after the new deterministic/visual gates pass; then deploy, prove one source,
+recover the existing Sync All, verify Search/Export, and only then enable morning automation.
 
-## 1.1 Phase 1G access-control gate (configured; deployment proof pending)
+## 1.1 Phase 1G access-control gate (deployed and verified)
 
 - Vercel API evidence identifies the project plan as Hobby. Current Vercel documentation
   states Standard Protection excludes Production domains on that plan, so provider-level
@@ -45,11 +49,12 @@ proof, Search/Export proof, Sync All, and only then morning enablement remain pe
   fails closed when its secret is absent.
 - The SPA renders only the login gate until session proof succeeds and exposes an explicit
   lock action. Cross-origin API access is disabled.
-- The local release suite passes: 242 backend tests against disposable PostgreSQL, 19
-  frontend component tests, 15 Playwright cases (plus six intentional viewport skips),
+- The current local release suite passes: 246 backend tests against disposable PostgreSQL,
+  20 frontend component tests, 15 Playwright cases (plus six intentional viewport skips),
   TypeScript, production build, full downgrade/upgrade sequencing, Alembic drift, and
-  strict application import with 39 routes. Gitleaks found no candidate secret and exact
-  candidate `3acb3af71dc7cd1f560946cadf846bacaa7530eb` passed CI run `31968416220`.
+  strict application import with 40 routes. Gitleaks found no candidate secret in the
+  recovery diff. The previously deployed exact candidate
+  `3acb3af71dc7cd1f560946cadf846bacaa7530eb` passed CI run `31968416220`.
 
 ## 2. Phase 1C outcome
 
@@ -157,13 +162,15 @@ flaky required test.
   GraphQL without hardcoding or logging a Storefront token. Browser acceptance also found
   and fixed the Export filename parser, which previously ignored `Content-Disposition`.
 
-Live evidence on 2026-08-16 is **10 healthy / 2 failed**. The healthy set includes
-Shopbloxs (534 products via root GraphQL) and BloxCrew (1,067 via GraphQL); across the ten
-healthy stores, 9,376 products had 100% valid-price coverage and zero duplicate identity/
-canonical-URL evidence, with no observed 429 or 5xx response. TubbysTubby's owner-provided
-canonical host is a parked/non-catalog site and fails safely. BuyBlox fails as
-`temporary_network`, consistent with its current certificate-chain problem; TLS validation
-was not bypassed. See `docs/COMPETITOR_COVERAGE.md`.
+Live evidence on 2026-08-18 is **10 healthy / 1 inactive / 1 network-specific**. The
+standard runner acquired 9,552 products with 100% valid-price coverage and zero duplicate
+identity/canonical-URL evidence on the ten healthy stores, with no observed 429 or 5xx
+response. TubbysTubby's canonical host is now a coming-soon portfolio, so it must be marked
+inactive while retaining history. BuyBlox's normal local run failed safely because the
+local resolver returned a Whalebone sinkhole; public DNS resolves Shopify and a focused,
+hostname-verified bounded run acquired 2,598 unique products with valid prices. No TLS
+validation bypass or store-specific parser was introduced. Production-runner evidence is
+still required. See `docs/COMPETITOR_COVERAGE.md`.
 
 Dependency review reduced npm audit from 13 advisories (1 critical, 5 high) to 4 (1 low,
 3 moderate, zero critical/high) using compatible explicit upgrades. The remaining React

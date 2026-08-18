@@ -10,6 +10,7 @@ import {
   getSyncFreshness,
   getSyncRequest,
   scanAllCompetitors,
+  retrySyncDispatch,
 } from '../lib/api'
 
 vi.mock('../lib/api', () => ({
@@ -20,6 +21,7 @@ vi.mock('../lib/api', () => ({
   getSyncRequest: vi.fn(),
   scanAllCompetitors: vi.fn(),
   scanNow: vi.fn(),
+  retrySyncDispatch: vi.fn(),
   seedDefaultCompetitors: vi.fn(),
   updateCompetitor: vi.fn(),
 }))
@@ -28,6 +30,7 @@ const mockedCompetitors = vi.mocked(getCompetitors)
 const mockedFreshness = vi.mocked(getSyncFreshness)
 const mockedRequest = vi.mocked(getSyncRequest)
 const mockedScanAll = vi.mocked(scanAllCompetitors)
+const mockedRetryDispatch = vi.mocked(retrySyncDispatch)
 
 const competitors: Competitor[] = [
   {
@@ -43,13 +46,13 @@ const competitors: Competitor[] = [
 ]
 
 const freshness: CompetitorFreshness[] = [
-  { competitor_id: 1, competitor_name: 'Alpha Market', coverage_complete: true, last_complete_at: '2026-08-15T08:30:00Z', latest_partial_at: null, last_failed_at: null, active_run: null },
-  { competitor_id: 2, competitor_name: 'Beta Market', coverage_complete: false, last_complete_at: '2026-08-14T08:30:00Z', latest_partial_at: '2026-08-15T08:35:00Z', last_failed_at: null, active_run: null },
+  { competitor_id: 1, competitor_name: 'Alpha Market', coverage_complete: true, last_complete_at: '2026-08-15T08:30:00Z', latest_partial_at: null, last_failed_at: null, active_products: 420, active_run: null },
+  { competitor_id: 2, competitor_name: 'Beta Market', coverage_complete: false, last_complete_at: '2026-08-14T08:30:00Z', latest_partial_at: '2026-08-15T08:35:00Z', last_failed_at: null, active_products: 80, active_run: null },
 ]
 
 const queuedRequest: SyncRequestStatus = {
   request_id: '00000000-0000-0000-0000-000000000001', trigger: 'manual_all', status: 'queued',
-  requested_at: '2026-08-15T09:00:00Z', dispatch_status: 'not_requested', runs: [],
+  requested_at: '2026-08-15T09:00:00Z', dispatch_status: 'not_requested', runner_state: 'waiting_for_runner', needs_runner_recovery: true, oldest_queued_seconds: 360, runs: [],
 }
 
 function renderCompetitors() {
@@ -63,6 +66,7 @@ describe('Competitor sync operations center', () => {
     mockedFreshness.mockResolvedValue(freshness)
     mockedScanAll.mockResolvedValue(queuedRequest)
     mockedRequest.mockResolvedValue(queuedRequest)
+    mockedRetryDispatch.mockResolvedValue({ ...queuedRequest, dispatch_status: 'dispatched', runner_state: 'dispatched', needs_runner_recovery: false })
   })
 
   afterEach(() => {
@@ -77,13 +81,26 @@ describe('Competitor sync operations center', () => {
     expect(screen.getByText('Beta Market')).toBeInTheDocument()
     expect(screen.getAllByText('Partial').length).toBeGreaterThan(0)
     expect(screen.getByText('Healthy')).toBeInTheDocument()
-    expect(screen.getByText('Attention')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Needs attention' })).toBeInTheDocument()
   })
 
   it('reports Sync All as a durable request rather than a completed refresh', async () => {
     renderCompetitors()
     await userEvent.click(await screen.findByRole('button', { name: /Sync all/i }))
-    expect(await screen.findByText('Sync request queued')).toBeInTheDocument()
-    expect(screen.getByText(/dispatch not requested/i)).toBeInTheDocument()
+    expect(await screen.findByText('Queued · waiting for runner')).toBeInTheDocument()
+    expect(screen.getByText(/oldest queued 6m/i)).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Retry dispatch' }))
+    expect(mockedRetryDispatch).toHaveBeenCalledWith(queuedRequest.request_id, expect.anything())
+  })
+
+  it('filters the compact table and expands only diagnostic evidence on demand', async () => {
+    renderCompetitors()
+    await screen.findByRole('table', { name: 'Competitor sync operations' })
+    expect(screen.getByText('420')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Show details for Alpha Market' }))
+    expect(screen.getByText('No active run')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Needs attention' }))
+    expect(screen.queryByText('Alpha Market')).not.toBeInTheDocument()
+    expect(screen.getByText('Beta Market')).toBeInTheDocument()
   })
 })

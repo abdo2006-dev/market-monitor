@@ -11,14 +11,14 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
-from sqlalchemy import and_, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database import AsyncSessionLocal
 from app.domain.acquisition import AcquisitionResult, acquire_catalog
-from app.models import Competitor, Event, ScrapeRun, SyncRequest, SyncRequestRun
+from app.models import Competitor, Event, Product, ScrapeRun, SyncRequest, SyncRequestRun
 
 
 logger = logging.getLogger(__name__)
@@ -549,7 +549,24 @@ async def get_request_status(session: AsyncSession, request_id: uuid.UUID) -> di
     ).scalar_one_or_none()
     if request is None:
         return None
-    runs = [_run_status(run) for run in request.runs]
+    now = datetime.now(timezone.utc)
+    runs = [_run_status(run, now=now) for run in request.runs]
+    queued_ages = [run["queue_age_seconds"] for run in runs if run["status"] == "queued"]
+    oldest_queued_seconds = max(queued_ages, default=None)
+    if any(run["status"] == "running" for run in runs):
+        runner_state = "running"
+    elif any(run["status"] == "retry_wait" for run in runs):
+        runner_state = "retry_wait"
+    elif not any(run["status"] == "queued" for run in runs):
+        runner_state = "terminal"
+    elif request.dispatch_status == "failed":
+        runner_state = "dispatch_recovery"
+    elif oldest_queued_seconds is not None and oldest_queued_seconds >= settings.SYNC_RUNNER_WAIT_SECONDS:
+        runner_state = "waiting_for_runner"
+    elif request.dispatch_status == "dispatched":
+        runner_state = "dispatched"
+    else:
+        runner_state = "awaiting_dispatch"
     return {
         "request_id": request.id,
         "trigger": request.trigger,
@@ -557,6 +574,9 @@ async def get_request_status(session: AsyncSession, request_id: uuid.UUID) -> di
         "requested_at": request.requested_at,
         "dispatch_status": request.dispatch_status,
         "dispatch_error_category": request.dispatch_error_category,
+        "runner_state": runner_state,
+        "needs_runner_recovery": runner_state in {"dispatch_recovery", "waiting_for_runner"},
+        "oldest_queued_seconds": oldest_queued_seconds,
         "runs": runs,
     }
 
@@ -599,6 +619,12 @@ async def get_competitor_freshness(session: AsyncSession) -> list[dict]:
             failed_runs, key=lambda r: (r.terminal_at or r.queued_at, r.id), default=None
         )
         active = next((r for r in runs if r.status in NON_TERMINAL_STATUSES), None)
+        active_products = await session.scalar(
+            select(func.count(Product.id)).where(
+                Product.competitor_id == competitor.id,
+                Product.active.is_(True),
+            )
+        )
         rows.append(
             {
                 "competitor_id": competitor.id,
@@ -609,16 +635,37 @@ async def get_competitor_freshness(session: AsyncSession) -> list[dict]:
                 "last_complete_at": complete.observation_completed_at if complete else None,
                 "latest_partial_at": partial.observation_completed_at if partial else None,
                 "last_failed_at": failed.terminal_at if failed else None,
+                "active_products": active_products or 0,
+                "last_complete_run": _run_status(complete) if complete else None,
                 "active_run": _run_status(active) if active else None,
             }
         )
     return rows
 
 
-def _run_status(run: ScrapeRun) -> dict:
+def _run_status(run: ScrapeRun, *, now: datetime | None = None) -> dict:
+    now = now or datetime.now(timezone.utc)
     duration = None
     if run.started_at and run.finished_at:
         duration = max(0.0, (run.finished_at - run.started_at).total_seconds())
+    queue_latency = max(0.0, (run.claimed_at - run.queued_at).total_seconds()) if run.claimed_at else None
+    acquisition_duration = (
+        max(0.0, (run.acquisition_completed_at - run.acquisition_started_at).total_seconds())
+        if run.acquisition_started_at and run.acquisition_completed_at else None
+    )
+    reconciliation_duration = (
+        max(0.0, (run.reconciled_at - run.acquisition_completed_at).total_seconds())
+        if run.reconciled_at and run.acquisition_completed_at else None
+    )
+    queue_age_seconds = max(0.0, (now - run.queued_at).total_seconds())
+    if run.status == "queued" and queue_age_seconds >= settings.SYNC_RUNNER_WAIT_SECONDS:
+        operator_state = "waiting_for_runner"
+    elif run.status == "retry_wait":
+        operator_state = "retry_scheduled"
+    elif run.status == "running" and run.lease_expires_at and run.lease_expires_at < now:
+        operator_state = "lease_expired"
+    else:
+        operator_state = run.status
     return {
         "run_id": run.id,
         "competitor_id": run.competitor_id,
@@ -627,8 +674,11 @@ def _run_status(run: ScrapeRun) -> dict:
         "trigger": run.trigger,
         "queued_at": run.queued_at,
         "started_at": run.started_at,
+        "claimed_at": run.claimed_at,
         "acquisition_started_at": run.acquisition_started_at,
         "acquisition_completed_at": run.acquisition_completed_at,
+        "observation_started_at": run.observation_started_at,
+        "observation_completed_at": run.observation_completed_at,
         "reconciled_at": run.reconciled_at,
         "terminal_at": run.terminal_at,
         "attempt": run.attempt_count,
@@ -639,11 +689,17 @@ def _run_status(run: ScrapeRun) -> dict:
         "failure_reason": run.error_message,
         "products_observed": run.products_found,
         "pages_fetched": run.pages_fetched,
+        "request_count": run.request_count,
         "page_cap_reached": run.page_cap_reached,
         "acquisition_strategy": run.acquisition_strategy,
         "completeness": run.completeness,
         "completeness_reason": run.completeness_reason,
         "duration_seconds": duration,
+        "queue_latency_seconds": queue_latency,
+        "acquisition_duration_seconds": acquisition_duration,
+        "reconciliation_duration_seconds": reconciliation_duration,
+        "queue_age_seconds": queue_age_seconds,
+        "operator_state": operator_state,
     }
 
 

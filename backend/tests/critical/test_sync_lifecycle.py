@@ -14,6 +14,7 @@ from app.application.sync import (
     claim_next_run,
     get_competitor_freshness,
     get_request_status,
+    get_run_status,
     process_claimed_run,
     recover_expired_leases,
     request_all_competitor_scans,
@@ -569,6 +570,31 @@ async def test_expired_lease_recovered_then_abandoned_when_attempts_exhausted(db
     assert (await db_session.get(ScrapeRun, run_id)).status == "abandoned"
 
 
+async def test_operator_diagnostics_expose_expired_lease_and_retry_recovery(db_session):
+    competitor = await make_competitor(db_session)
+    _, run = await requested_run(db_session, competitor.id)
+    run_id = run.id
+    claimed = await claim(run_id)
+    assert claimed is not None
+
+    async with AsyncSessionLocal() as session:
+        persisted = await session.get(ScrapeRun, run_id)
+        persisted.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        await session.commit()
+
+    db_session.expire_all()
+    expired = await get_run_status(db_session, run_id)
+    assert expired["operator_state"] == "lease_expired"
+
+    async with AsyncSessionLocal() as session:
+        recovered = await recover_expired_leases(session)
+        await session.commit()
+    assert recovered == {"recovered": 1, "abandoned": 0}
+    db_session.expire_all()
+    retrying = await get_run_status(db_session, run_id)
+    assert retrying["operator_state"] == "retry_scheduled"
+
+
 async def test_expired_old_owner_cannot_apply_overlapping_complete_absence(db_session):
     competitor = await make_competitor(db_session)
     product = await make_product(
@@ -846,6 +872,88 @@ async def test_dispatch_failure_remains_queued_and_truthful(db_session, api_clie
     assert body["status"] == "queued"
     assert body["dispatch_status"] == "failed"
     assert body["dispatch_error_category"] == "github_unreachable"
+
+
+async def test_dispatch_failure_is_recoverable_without_duplicate_request_or_run(db_session):
+    from app.infrastructure.github_actions import _record_dispatch
+
+    competitor = await make_competitor(db_session)
+    competitor_id = competitor.id
+    request = await request_competitor_scan(
+        db_session, competitor_id, request_idempotency_key="manual:recover-existing"
+    )
+    await db_session.commit()
+    payload = await get_request_status(db_session, request.id)
+    run = await db_session.get(ScrapeRun, payload["runs"][0]["run_id"])
+    request_id = request.id
+    run_id = run.id
+    await _record_dispatch(request_id, "failed", "github_unreachable")
+    db_session.expire_all()
+
+    same_request = await request_competitor_scan(
+        db_session,
+        competitor_id,
+        request_idempotency_key="manual:recover-existing",
+    )
+    await db_session.commit()
+    status = await get_request_status(db_session, request_id)
+
+    assert same_request.id == request_id
+    assert status["status"] == "queued"
+    assert status["runner_state"] == "dispatch_recovery"
+    assert status["needs_runner_recovery"] is True
+    assert await db_session.scalar(select(func.count(SyncRequest.id))) == 1
+    assert await db_session.scalar(select(func.count(ScrapeRun.id))) == 1
+
+    recovered = await claim(run_id)
+    assert recovered is not None
+    assert recovered.run_id == run_id
+
+
+async def test_dispatched_but_unclaimed_request_reports_waiting_then_later_claims(db_session):
+    from app.infrastructure.github_actions import _record_dispatch
+
+    competitor = await make_competitor(db_session)
+    request, run = await requested_run(db_session, competitor.id)
+    request_id = request.id
+    run_id = run.id
+    run.queued_at = BASE
+    run.next_attempt_at = BASE
+    await db_session.commit()
+    await _record_dispatch(request_id, "dispatched", None)
+    db_session.expire_all()
+
+    status = await get_request_status(db_session, request_id)
+    assert status["status"] == "queued"
+    assert status["runner_state"] == "waiting_for_runner"
+    assert status["needs_runner_recovery"] is True
+    assert status["oldest_queued_seconds"] >= 300
+
+    recovered = await claim(run_id, now=BASE + timedelta(minutes=10))
+    assert recovered is not None
+    assert recovered.run_id == run_id
+
+
+async def test_retry_dispatch_endpoint_reuses_same_durable_request(db_session, api_client, monkeypatch):
+    from app.infrastructure.github_actions import _record_dispatch
+    import app.api.sync as sync_api
+
+    competitor = await make_competitor(db_session)
+    request, _ = await requested_run(db_session, competitor.id)
+    request_id = request.id
+
+    async def successful_dispatch(dispatched_request_id):
+        await _record_dispatch(dispatched_request_id, "dispatched", None)
+        return "dispatched"
+
+    monkeypatch.setattr(sync_api, "dispatch_sync_request", successful_dispatch)
+    response = await api_client.post(f"/api/sync/requests/{request_id}/dispatch")
+
+    assert response.status_code == 202
+    assert response.json()["request_id"] == str(request_id)
+    assert response.json()["dispatch_status"] == "dispatched"
+    assert await db_session.scalar(select(func.count(SyncRequest.id))) == 1
+    assert await db_session.scalar(select(func.count(ScrapeRun.id))) == 1
 
 
 async def test_compatibility_cron_cannot_create_automatic_v2_work_while_disabled(

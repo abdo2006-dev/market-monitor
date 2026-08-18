@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 import uuid
 
 import httpx
@@ -13,11 +14,19 @@ from app.database import AsyncSessionLocal
 from app.models import SyncRequest
 
 
+logger = logging.getLogger(__name__)
+
+
 async def dispatch_sync_request(request_id: uuid.UUID) -> str:
     if settings.SYNC_DISPATCH_PROVIDER != "github_actions":
+        logger.info("Sync dispatch not requested", extra={"sync_request_id": str(request_id)})
         return "not_requested"
     if not settings.GITHUB_ACTIONS_DISPATCH_TOKEN or not settings.GITHUB_ACTIONS_REPOSITORY:
         await _record_dispatch(request_id, "failed", "dispatcher_not_configured")
+        logger.warning(
+            "Sync dispatch needs recovery",
+            extra={"sync_request_id": str(request_id), "failure_category": "dispatcher_not_configured"},
+        )
         return "failed"
 
     url = (
@@ -43,15 +52,19 @@ async def dispatch_sync_request(request_id: uuid.UUID) -> str:
     except httpx.HTTPStatusError as exc:
         category = f"github_http_{exc.response.status_code}"
         await _record_dispatch(request_id, "failed", category)
+        logger.warning("Sync dispatch needs recovery", extra={"sync_request_id": str(request_id), "failure_category": category})
         return "failed"
     except httpx.RequestError:
         await _record_dispatch(request_id, "failed", "github_unreachable")
+        logger.warning("Sync dispatch needs recovery", extra={"sync_request_id": str(request_id), "failure_category": "github_unreachable"})
         return "failed"
     except ValueError:
         await _record_dispatch(request_id, "failed", "dispatcher_configuration")
+        logger.warning("Sync dispatch needs recovery", extra={"sync_request_id": str(request_id), "failure_category": "dispatcher_configuration"})
         return "failed"
 
     await _record_dispatch(request_id, "dispatched", None)
+    logger.info("Sync runner dispatched", extra={"sync_request_id": str(request_id)})
     return "dispatched"
 
 

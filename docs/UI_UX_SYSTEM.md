@@ -108,6 +108,11 @@ or degraded evidence → technical details. Reliable low and observed low remain
 Autocomplete preserves combobox semantics, keyboard navigation, 250ms debounce, stable
 loading geometry, and visible focus.
 
+Repeated degraded evidence uses compact default labels such as `Legacy data · observed
+12d ago` and `Sync failed · stored price 3d ago`. The complete backend-owned warning is
+preserved in Evidence details. At desktop widths the seller identity and listing evidence
+share one compact comparison row; mobile keeps the stacked composition.
+
 ### Exports
 
 Exports reads as four steps: choose source → set collection → verify outcome → download.
@@ -117,10 +122,14 @@ they are not one panel with only a badge-color change.
 
 ### Competitor Sync
 
-The page opens with the most recent complete source evidence and counts for healthy,
-partial, needs attention, and active now. Each source row shows lifecycle, last complete/evidence,
-observed count for the visible run, and one primary Sync action. Configuration and delete
-actions live behind the row action menu. No fake percentage progress is shown.
+The page opens with one compact command/readiness bar. Desktop uses a seven-column
+operations table for competitor, status, last success, products, coverage, note, and
+action. Technical lifecycle IDs, timestamps, attempts, acquisition evidence, and full
+reasons expand one row at a time. Configuration and delete actions live behind the row
+action menu. Queued work distinguishes awaiting dispatch, waiting for a runner, and
+dispatch recovery; the recovery action retries the same durable request. No fake
+percentage progress is shown. Mobile uses compact two-column rows and collapsible details
+rather than squeezing the desktop table.
 
 ## 7. Responsive strategy
 

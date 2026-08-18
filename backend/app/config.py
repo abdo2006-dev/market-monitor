@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     SYNC_EXECUTION_MODE: Literal["v2", "legacy"] = "v2"
     SYNC_MAX_ATTEMPTS: int = 3
     SYNC_LEASE_SECONDS: int = 600
+    # A queued request is still recoverable, but after this age the API/UI must
+    # say that it is waiting for a runner instead of looking newly accepted.
+    SYNC_RUNNER_WAIT_SECONDS: int = 300
     # Default-off rollout gate for every automatic morning request producer.
     # Manual V2 requests and explicit request-id workers remain available.
     SYNC_MORNING_ENABLED: bool = False

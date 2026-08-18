@@ -69,6 +69,7 @@ than Phase 0.
 | POST | `/api/sync/competitors/{id}` | `SyncRequestStatus` | 202 after durable commit; optional `Idempotency-Key` (max 180 chars) |
 | POST | `/api/sync/all` | `SyncRequestStatus` | 202 grouped request; one run per active competitor/reused active run |
 | GET | `/api/sync/requests/{uuid}` | `SyncRequestStatus` | aggregate state plus per-run statuses |
+| POST | `/api/sync/requests/{uuid}/dispatch` | `SyncRequestStatus` | retries runner notification for the same recoverable request; creates no request/run |
 | GET | `/api/sync/runs/{id}` | `SyncRunStatus` | one durable lifecycle record |
 | GET | `/api/sync/freshness` | `list[CompetitorFreshness]` | minimum backend evidence for Phase 1C |
 
@@ -78,9 +79,21 @@ means queued work remains recoverable; it is never converted to Sync failure/suc
 
 `SyncRunStatus` exposes only safe fields: run/competitor identity, execution status,
 trigger, lifecycle timestamps, attempt budget/retry time/lease expiry, failure category
-and sanitized reason, product/page counts, strategy, completeness/cap evidence, and
-duration. It does not expose claim tokens, worker credentials, storefront tokens, raw
+and sanitized reason, product/page/request counts, strategy, completeness/cap evidence,
+and queue/acquisition/reconciliation durations. It does not expose claim tokens, worker
+credentials, storefront tokens, raw
 responses, or stack traces.
+
+Operator diagnostics are additive. Every run includes `queue_age_seconds` and
+`operator_state` (`waiting_for_runner`, `lease_expired`, or the durable lifecycle state).
+Every request includes `runner_state`, `needs_runner_recovery`, and nullable
+`oldest_queued_seconds`. A queue older than `SYNC_RUNNER_WAIT_SECONDS` remains durable and
+recoverable; it is not fabricated into a terminal failure. `POST .../dispatch` retries the
+configured provider against that request UUID and rejects terminal requests with 409.
+
+Freshness rows include the active stored-product count and latest complete-run evidence so
+the compact operations UI can distinguish stored history from products observed in an
+active run.
 
 `SyncRequestStatus.status` aggregates to `queued`, `running`, `retrying`, `success`,
 `partial`, or `failed`. A successful execution with partial/suspicious coverage aggregates

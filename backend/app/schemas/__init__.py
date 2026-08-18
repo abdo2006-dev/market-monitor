@@ -142,8 +142,11 @@ class SyncRunStatus(BaseModel):
     trigger: str
     queued_at: datetime
     started_at: Optional[datetime] = None
+    claimed_at: Optional[datetime] = None
     acquisition_started_at: Optional[datetime] = None
     acquisition_completed_at: Optional[datetime] = None
+    observation_started_at: Optional[datetime] = None
+    observation_completed_at: Optional[datetime] = None
     reconciled_at: Optional[datetime] = None
     terminal_at: Optional[datetime] = None
     attempt: int
@@ -154,11 +157,17 @@ class SyncRunStatus(BaseModel):
     failure_reason: Optional[str] = None
     products_observed: int
     pages_fetched: int
+    request_count: int
     page_cap_reached: bool
     acquisition_strategy: Optional[str] = None
     completeness: str
     completeness_reason: Optional[str] = None
     duration_seconds: Optional[float] = None
+    queue_latency_seconds: Optional[float] = None
+    acquisition_duration_seconds: Optional[float] = None
+    reconciliation_duration_seconds: Optional[float] = None
+    queue_age_seconds: float
+    operator_state: str
 
 
 class SyncRequestStatus(BaseModel):
@@ -168,6 +177,9 @@ class SyncRequestStatus(BaseModel):
     requested_at: datetime
     dispatch_status: str
     dispatch_error_category: Optional[str] = None
+    runner_state: str
+    needs_runner_recovery: bool
+    oldest_queued_seconds: Optional[float] = None
     runs: List[SyncRunStatus]
 
 
@@ -178,6 +190,8 @@ class CompetitorFreshness(BaseModel):
     last_complete_at: Optional[datetime] = None
     latest_partial_at: Optional[datetime] = None
     last_failed_at: Optional[datetime] = None
+    active_products: int = 0
+    last_complete_run: Optional[SyncRunStatus] = None
     active_run: Optional[SyncRunStatus] = None
 
 
