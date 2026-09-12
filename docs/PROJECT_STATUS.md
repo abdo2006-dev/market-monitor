@@ -3,20 +3,20 @@
 **Read this first.** This is the handoff file between working sessions. If it is stale,
 fix it as part of the task.
 
-_Last updated: 2026-08-18, Production Sync recovery in progress after the first protected V2 deployment exposed an intentionally disabled runner dispatch path._
+_Last updated: 2026-09-12, controlled Production Sync recovery completed; final database-integrity and non-empty Export evidence remain before enabling the scheduled morning run._
 
 ## 1. Where we are
 
 | | |
 |---|---|
-| **Current phase** | **Production Sync recovery and compact operations UX** — exact stuck-request trace complete; diagnostics/redispatch and compact Competitors/Search work are on `codex/production-sync-recovery`. Local deterministic, migration, build, and visual gates pass. Dispatcher credential, deployment, one-source proof, and recovered Sync All remain pending. |
+| **Current phase** | **Production Sync recovery evidence gate** — the protected V2 release is deployed and automatic Vercel → GitHub Actions dispatch is proven. A controlled Sync All has reached terminal states with 11 complete sources and one explicitly partial source. Do not enable the scheduled morning run or begin Phase 2 until the remaining read-only duplicate/removal audit and a non-empty Export proof are recorded. |
 | **Phase 1D base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` (Phase 1C checkpoint) |
 | **Phase 1C base** | `e70de6d80e0ebeda5aeccf633e6d6f9c963d0fc7` |
 | **Phase 1B.2 base** | `68db83e879a5ed738c80d0abddff10fa69f0dbb1` |
-| **Working branch** | `codex/production-sync-recovery` from Production `main` merge `d9fc034dad011d26e1e496a8607b66d7b9d7e694` |
+| **Working branch** | Production code is `main` merge `2548e5c47d08f6583606483e275a9e60d83d8079`; this documentation-only evidence update is on `codex/production-sync-rollout-evidence`. |
 | **Migration head** | `0005_durable_sync_lifecycle` |
 | **Archive baseline** | `archive/pre-v2-rearchitecture` → `f346f70`; do not move or delete. |
-| **Production** | Vercel deployment `dpl_3XxcwY3fMyPR2Ljx5dk4bs1XNt7C` is Ready from exact `main` `d9fc034dad011d26e1e496a8607b66d7b9d7e694`; strict startup reports `0005_durable_sync_lifecycle`. Owner-created request `bfaafbdd-7597-4f29-b078-888075da32de` durably created 12 queued runs, but dispatcher `none` produced no GitHub run. Every run remains attempt 0 with no claim/lease/acquisition/reconciliation. Recovery branch `phase1g-pre-migration-20260816-1901z` remains available through 2026-08-23 21:02 GMT+2. |
+| **Production** | Vercel deployment `dpl_51Mpaa9b5duujNvf8orUy6k4m5oP` is Ready from exact `main` `2548e5c47d08f6583606483e275a9e60d83d8079`; strict startup reports `0005_durable_sync_lifecycle`. Production uses the server-only GitHub dispatcher with a least-privilege credential. One Zyron request dispatched automatically to GitHub Actions run `34664824554` and completed. The recovered Sync All dispatched runs `34664884953` and `34664897918`; the first claimed the durable work and the second claimed none, demonstrating the no-duplicate claim fence. `SYNC_MORNING_ENABLED` remains false. |
 | **User-test Preview** | Vercel Preview is Ready on `preview/market-monitor-v2`, backed by isolated resource `market-monitor-v2-preview-db` at migration head with seven deterministic competitors and no runner. See `docs/PREVIEW_TESTING.md`. |
 
 Priority remains: P0 migration safety, P1 Sync, P2 Search, P3 Export, P4 daily-workflow
@@ -28,13 +28,29 @@ counts before any write. Production moved through B- → stamped 0003 → consol
 → 0005 → Case A, with final head/drift/constraint/count checks green. GitHub environment
 `production-sync` has a `main`-only policy, `PRODUCTION_DATABASE_URL`, no approval delay,
 and `SYNC_MORNING_ENABLED=false`. Vercel has strict schema verification, V2 execution,
-dispatcher/morning disabled, fail-closed cron credentials, and sensitive application-auth
-credentials. Production deployment/authentication passed, then the first owner Sync All
-proved the intentionally disabled dispatcher was not a usable daily topology. The recovery
-branch adds truthful queue/lease diagnostics, same-request redispatch, a compact operations
-table, and reduced Search warning repetition. Configure a least-privilege server dispatcher
-token only after the new deterministic/visual gates pass; then deploy, prove one source,
-recover the existing Sync All, verify Search/Export, and only then enable morning automation.
+server-only GitHub dispatch, fail-closed cron credentials, and sensitive application-auth
+credentials.
+
+On 2026-09-12, the owner-triggered Zyron smoke queued, automatically dispatched, claimed,
+reconciled, and completed with 630 complete observations. The subsequent recovered Sync All
+processed the durable request in GitHub Actions run `34664884953`: BloxCrew 1,040, Bloxy
+Store 346, PetPatch 253, Shopbloxs 534, Luger 2,613, BuyBlox 2,668, MM2Cheap 395, BloxyBarn
+891, Bloxshop 556, TubbysTubby 168, and Zyron 630 all completed with complete coverage.
+Bloxloot completed honestly as **partial** after Shopify returned HTTP 502 for page 3;
+500 observations were acquired, while the UI retains its existing 2,054 stored rows and
+does not infer removals. A retry workflow completed without claiming any run, so it did not
+duplicate reconciliation work. TubbysTubby is therefore confirmed live, not parked.
+
+Production Search now shows the distinction correctly: the Batwing comparison has eight
+trustworthy/current USD prices while Bloxloot's partial, older observation remains visible
+but excluded from the reliable range. Export behavior is also truthful but not yet fully
+proven: two Bloxshop live collection requests returned `suspicious_empty` (zero products,
+absence inference disabled), and the cached request returned its explicit no-matching-cache
+failure. Obtain a valid non-empty collection URL and verify the downloadable CSV/JSON
+provenance before calling the Export gate green. A read-only production duplicate/removal
+audit is also still required; Neon console sign-in was unavailable during this pass. Do not
+enable the morning schedule, mark Bloxloot inactive, or start Phase 2 until these remaining
+gates are evidenced.
 
 ## 1.1 Phase 1G access-control gate (deployed and verified)
 
